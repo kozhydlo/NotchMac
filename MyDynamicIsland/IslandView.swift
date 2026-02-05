@@ -1,4 +1,5 @@
 import Combine
+import IOKit.ps
 import ServiceManagement
 import SwiftUI
 
@@ -312,16 +313,95 @@ struct NotchView: View {
     }
 
     private var defaultExpanded: some View {
-        VStack(spacing: 4) {
-            Text(timeString)
-                .font(.system(size: 26, weight: .medium, design: .rounded))
-                .foregroundStyle(.white)
-                .monospacedDigit()
+        HStack(spacing: 16) {
+            // Left: Time & Date
+            VStack(alignment: .leading, spacing: 2) {
+                Text(timeString)
+                    .font(.system(size: 28, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
 
-            Text(dateString)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.white.opacity(0.5))
+                Text(dateString)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+
+            Spacer()
+
+            // Right: Quick Stats
+            HStack(spacing: 12) {
+                // Battery indicator
+                QuickStatView(
+                    icon: batteryIcon,
+                    value: "\(batteryLevel)%",
+                    color: batteryColor
+                )
+
+                // WiFi indicator
+                QuickStatView(
+                    icon: "wifi",
+                    value: wifiName,
+                    color: .cyan
+                )
+            }
         }
+        .padding(.horizontal, 4)
+    }
+
+    // MARK: - Quick Stats Helpers
+
+    private var batteryLevel: Int {
+        let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue()
+        let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef] ?? []
+
+        for source in sources {
+            if let info = IOPSGetPowerSourceDescription(snapshot, source)?.takeUnretainedValue() as? [String: Any],
+               let capacity = info[kIOPSCurrentCapacityKey] as? Int {
+                return capacity
+            }
+        }
+        return 100
+    }
+
+    private var batteryIcon: String {
+        let level = batteryLevel
+        if level > 75 { return "battery.100" }
+        if level > 50 { return "battery.75" }
+        if level > 25 { return "battery.50" }
+        if level > 10 { return "battery.25" }
+        return "battery.0"
+    }
+
+    private var batteryColor: Color {
+        let level = batteryLevel
+        if level > 20 { return .green }
+        if level > 10 { return .orange }
+        return .red
+    }
+
+    private var wifiName: String {
+        // Get current WiFi name
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
+        process.arguments = ["-getairportnetwork", "en0"]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let output = String(data: data, encoding: .utf8) {
+                let parts = output.components(separatedBy: ": ")
+                if parts.count > 1 {
+                    return String(parts[1].trimmingCharacters(in: .whitespacesAndNewlines).prefix(8))
+                }
+            }
+        } catch {}
+
+        return "Wi-Fi"
     }
 
     // MARK: - Interactions
@@ -353,20 +433,20 @@ struct NotchView: View {
         if hovering {
             hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { _ in
                 DispatchQueue.main.async {
-                    guard !state.isExpanded else { return }
+                    guard !self.state.isExpanded else { return }
                     NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
                     withAnimation {
-                        state.isExpanded = true
+                        self.state.isExpanded = true
                     }
-                    scheduleCollapse(delay: 4)
+                    self.scheduleCollapse(delay: 4)
                 }
             }
         } else {
             hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in
                 DispatchQueue.main.async {
-                    guard state.hud == .none else { return }
+                    guard self.state.hud == .none else { return }
                     withAnimation {
-                        state.isExpanded = false
+                        self.state.isExpanded = false
                     }
                 }
             }
@@ -388,8 +468,8 @@ struct NotchView: View {
         collapseTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in
             DispatchQueue.main.async {
                 withAnimation {
-                    state.hud = .none
-                    state.isExpanded = false
+                    self.state.hud = .none
+                    self.state.isExpanded = false
                 }
             }
         }
@@ -463,6 +543,28 @@ struct NotchView: View {
     }
 }
 
+// MARK: - Quick Stat View
+
+struct QuickStatView: View {
+    let icon: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(color)
+
+            Text(value)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.white.opacity(0.7))
+                .lineLimit(1)
+        }
+        .frame(width: 40)
+    }
+}
+
 // MARK: - Settings Window
 
 final class SettingsWindowController {
@@ -481,9 +583,10 @@ final class SettingsWindowController {
         let hostingController = NSHostingController(rootView: settingsView)
 
         let window = NSWindow(contentViewController: hostingController)
-        window.title = "Dynamic Island Settings"
-        window.styleMask = [.titled, .closable, .miniaturizable]
-        window.setContentSize(NSSize(width: 400, height: 300))
+        window.title = "NotchMac Settings"
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.setContentSize(NSSize(width: 600, height: 450))
+        window.minSize = NSSize(width: 550, height: 400)
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -492,118 +595,725 @@ final class SettingsWindowController {
     }
 }
 
+// MARK: - Settings View with Sidebar
+
 struct SettingsView: View {
+    @State private var selectedTab: SettingsTab = .general
+
+    enum SettingsTab: String, CaseIterable {
+        case general = "General"
+        case volume = "Volume"
+        case brightness = "Brightness"
+        case music = "Music"
+        case about = "About"
+
+        var icon: String {
+            switch self {
+            case .general: return "gearshape.fill"
+            case .volume: return "speaker.wave.3.fill"
+            case .brightness: return "sun.max.fill"
+            case .music: return "music.note"
+            case .about: return "info.circle.fill"
+            }
+        }
+
+        var color: Color {
+            switch self {
+            case .general: return .gray
+            case .volume: return .blue
+            case .brightness: return .orange
+            case .music: return .green
+            case .about: return .purple
+            }
+        }
+    }
+
+    var body: some View {
+        NavigationSplitView {
+            List(SettingsTab.allCases, id: \.self, selection: $selectedTab) { tab in
+                Label {
+                    Text(tab.rawValue)
+                } icon: {
+                    Image(systemName: tab.icon)
+                        .foregroundStyle(tab.color)
+                }
+                .padding(.vertical, 4)
+            }
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 160, ideal: 180)
+        } detail: {
+            Group {
+                switch selectedTab {
+                case .general:
+                    GeneralSettingsView()
+                case .volume:
+                    VolumeSettingsView()
+                case .brightness:
+                    BrightnessSettingsView()
+                case .music:
+                    MusicSettingsView()
+                case .about:
+                    AboutSettingsView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(width: 600, height: 450)
+    }
+}
+
+// MARK: - General Settings
+
+struct GeneralSettingsView: View {
     @AppStorage("expandOnHover") private var expandOnHover = true
     @AppStorage("showHapticFeedback") private var showHapticFeedback = true
     @AppStorage("autoCollapseDelay") private var autoCollapseDelay = 4.0
     @AppStorage("launchAtLogin") private var launchAtLogin = false
     @AppStorage("hideFromDock") private var hideFromDock = false
-    @AppStorage("showVolumeHUD") private var showVolumeHUD = true
-    @AppStorage("showBrightnessHUD") private var showBrightnessHUD = true
-    @AppStorage("showMusicActivity") private var showMusicActivity = true
 
     var body: some View {
-        TabView {
-            // General Tab
-            Form {
-                Section {
-                    Toggle("Launch at Login", isOn: $launchAtLogin)
-                        .onChange(of: launchAtLogin) { _, newValue in
-                            LaunchAtLogin.setEnabled(newValue)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                // Header
+                SettingsHeader(title: "General", subtitle: "Basic app settings", icon: "gearshape.fill", color: .gray)
+
+                // System Section
+                SettingsSection(title: "System") {
+                    SettingsToggleRow(
+                        title: "Launch at Login",
+                        subtitle: "Start NotchMac when you log in",
+                        icon: "power",
+                        color: .green,
+                        isOn: $launchAtLogin
+                    )
+                    .onChange(of: launchAtLogin) { _, newValue in
+                        LaunchAtLogin.setEnabled(newValue)
+                    }
+
+                    Divider().padding(.horizontal)
+
+                    SettingsToggleRow(
+                        title: "Hide from Dock",
+                        subtitle: "Only show in menu bar area",
+                        icon: "dock.arrow.down.rectangle",
+                        color: .blue,
+                        isOn: $hideFromDock
+                    )
+                    .onChange(of: hideFromDock) { _, newValue in
+                        NSApp.setActivationPolicy(newValue ? .accessory : .regular)
+                    }
+                }
+
+                // Behavior Section
+                SettingsSection(title: "Behavior") {
+                    SettingsToggleRow(
+                        title: "Expand on Hover",
+                        subtitle: "Open menu when hovering over notch",
+                        icon: "cursorarrow.motionlines",
+                        color: .orange,
+                        isOn: $expandOnHover
+                    )
+
+                    Divider().padding(.horizontal)
+
+                    SettingsToggleRow(
+                        title: "Haptic Feedback",
+                        subtitle: "Vibration on interactions",
+                        icon: "hand.tap.fill",
+                        color: .purple,
+                        isOn: $showHapticFeedback
+                    )
+
+                    Divider().padding(.horizontal)
+
+                    SettingsPickerRow(
+                        title: "Auto Collapse",
+                        subtitle: "Time before menu closes",
+                        icon: "timer",
+                        color: .cyan,
+                        selection: $autoCollapseDelay,
+                        options: [
+                            (2.0, "2s"),
+                            (4.0, "4s"),
+                            (6.0, "6s"),
+                            (0.0, "Never")
+                        ]
+                    )
+                }
+
+                Spacer()
+            }
+            .padding(24)
+        }
+    }
+}
+
+// MARK: - Volume Settings
+
+struct VolumeSettingsView: View {
+    @AppStorage("showVolumeHUD") private var showVolumeHUD = true
+    @AppStorage("volumeHUDStyle") private var volumeHUDStyle = "modern"
+    @AppStorage("volumeHUDColor") private var volumeHUDColor = "white"
+    @AppStorage("volumeAnimationSpeed") private var volumeAnimationSpeed = 0.15
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                SettingsHeader(title: "Volume HUD", subtitle: "Customize volume indicator", icon: "speaker.wave.3.fill", color: .blue)
+
+                SettingsSection(title: "General") {
+                    SettingsToggleRow(
+                        title: "Enable Volume HUD",
+                        subtitle: "Replace system volume overlay",
+                        icon: "speaker.wave.2.fill",
+                        color: .blue,
+                        isOn: $showVolumeHUD
+                    )
+                }
+
+                if showVolumeHUD {
+                    SettingsSection(title: "Appearance") {
+                        SettingsPickerRow(
+                            title: "Style",
+                            subtitle: "Visual appearance",
+                            icon: "paintbrush.fill",
+                            color: .pink,
+                            selection: $volumeHUDStyle,
+                            options: [
+                                ("modern", "Modern"),
+                                ("minimal", "Minimal"),
+                                ("classic", "Classic")
+                            ]
+                        )
+
+                        Divider().padding(.horizontal)
+
+                        SettingsPickerRow(
+                            title: "Color",
+                            subtitle: "Progress bar color",
+                            icon: "paintpalette.fill",
+                            color: .purple,
+                            selection: $volumeHUDColor,
+                            options: [
+                                ("white", "White"),
+                                ("blue", "Blue"),
+                                ("green", "Green"),
+                                ("rainbow", "Rainbow")
+                            ]
+                        )
+                    }
+
+                    SettingsSection(title: "Animation") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Image(systemName: "hare.fill")
+                                    .foregroundStyle(.orange)
+                                Text("Animation Speed")
+                                Spacer()
+                                Text(String(format: "%.2fs", volumeAnimationSpeed))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal)
+                            .padding(.top, 12)
+
+                            Slider(value: $volumeAnimationSpeed, in: 0.05...0.5, step: 0.05)
+                                .padding(.horizontal)
+                                .padding(.bottom, 12)
                         }
+                    }
 
-                    Toggle("Hide from Dock", isOn: $hideFromDock)
-                        .onChange(of: hideFromDock) { _, newValue in
-                            setDockVisibility(hidden: newValue)
+                    // Preview
+                    SettingsSection(title: "Preview") {
+                        VolumePreview(style: volumeHUDStyle, color: volumeHUDColor)
+                            .padding()
+                    }
+                }
+
+                Spacer()
+            }
+            .padding(24)
+        }
+    }
+}
+
+// MARK: - Brightness Settings
+
+struct BrightnessSettingsView: View {
+    @AppStorage("showBrightnessHUD") private var showBrightnessHUD = true
+    @AppStorage("brightnessHUDStyle") private var brightnessHUDStyle = "modern"
+    @AppStorage("brightnessHUDColor") private var brightnessHUDColor = "yellow"
+    @AppStorage("brightnessAnimationSpeed") private var brightnessAnimationSpeed = 0.15
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                SettingsHeader(title: "Brightness HUD", subtitle: "Customize brightness indicator", icon: "sun.max.fill", color: .orange)
+
+                SettingsSection(title: "General") {
+                    SettingsToggleRow(
+                        title: "Enable Brightness HUD",
+                        subtitle: "Replace system brightness overlay",
+                        icon: "sun.min.fill",
+                        color: .orange,
+                        isOn: $showBrightnessHUD
+                    )
+                }
+
+                if showBrightnessHUD {
+                    SettingsSection(title: "Appearance") {
+                        SettingsPickerRow(
+                            title: "Style",
+                            subtitle: "Visual appearance",
+                            icon: "paintbrush.fill",
+                            color: .pink,
+                            selection: $brightnessHUDStyle,
+                            options: [
+                                ("modern", "Modern"),
+                                ("minimal", "Minimal"),
+                                ("classic", "Classic")
+                            ]
+                        )
+
+                        Divider().padding(.horizontal)
+
+                        SettingsPickerRow(
+                            title: "Color",
+                            subtitle: "Progress bar color",
+                            icon: "paintpalette.fill",
+                            color: .purple,
+                            selection: $brightnessHUDColor,
+                            options: [
+                                ("yellow", "Yellow"),
+                                ("orange", "Orange"),
+                                ("white", "White"),
+                                ("rainbow", "Rainbow")
+                            ]
+                        )
+                    }
+
+                    SettingsSection(title: "Animation") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Image(systemName: "hare.fill")
+                                    .foregroundStyle(.orange)
+                                Text("Animation Speed")
+                                Spacer()
+                                Text(String(format: "%.2fs", brightnessAnimationSpeed))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal)
+                            .padding(.top, 12)
+
+                            Slider(value: $brightnessAnimationSpeed, in: 0.05...0.5, step: 0.05)
+                                .padding(.horizontal)
+                                .padding(.bottom, 12)
                         }
-                } header: {
-                    Text("System")
-                }
-
-                Section {
-                    Toggle("Expand on hover", isOn: $expandOnHover)
-                    Toggle("Haptic feedback", isOn: $showHapticFeedback)
-
-                    Picker("Auto-collapse", selection: $autoCollapseDelay) {
-                        Text("2 seconds").tag(2.0)
-                        Text("4 seconds").tag(4.0)
-                        Text("6 seconds").tag(6.0)
-                        Text("Never").tag(0.0)
                     }
-                } header: {
-                    Text("Behavior")
-                }
-            }
-            .formStyle(.grouped)
-            .tabItem {
-                Label("General", systemImage: "gearshape")
-            }
 
-            // Features Tab
-            Form {
-                Section {
-                    Toggle("Volume HUD", isOn: $showVolumeHUD)
-                    Toggle("Brightness HUD", isOn: $showBrightnessHUD)
-                } header: {
-                    Text("System Controls")
-                } footer: {
-                    Text("Replace system volume and brightness overlays")
+                    // Preview
+                    SettingsSection(title: "Preview") {
+                        BrightnessPreview(style: brightnessHUDStyle, color: brightnessHUDColor)
+                            .padding()
+                    }
                 }
 
-                Section {
-                    Toggle("Music Activity", isOn: $showMusicActivity)
-                } header: {
-                    Text("Live Activities")
-                } footer: {
-                    Text("Show now playing info from Spotify, Apple Music, browsers, etc.")
-                }
+                Spacer()
             }
-            .formStyle(.grouped)
-            .tabItem {
-                Label("Features", systemImage: "sparkles")
-            }
+            .padding(24)
+        }
+    }
+}
 
-            // About Tab
-            Form {
-                Section {
+// MARK: - Music Settings
+
+struct MusicSettingsView: View {
+    @AppStorage("showMusicActivity") private var showMusicActivity = true
+    @AppStorage("showMusicVisualizer") private var showMusicVisualizer = true
+    @AppStorage("musicVisualizerColor") private var musicVisualizerColor = "green"
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                SettingsHeader(title: "Music Activity", subtitle: "Now playing settings", icon: "music.note", color: .green)
+
+                SettingsSection(title: "General") {
+                    SettingsToggleRow(
+                        title: "Show Music Activity",
+                        subtitle: "Display now playing in notch",
+                        icon: "music.note.list",
+                        color: .green,
+                        isOn: $showMusicActivity
+                    )
+                }
+
+                if showMusicActivity {
+                    SettingsSection(title: "Visualizer") {
+                        SettingsToggleRow(
+                            title: "Audio Visualizer",
+                            subtitle: "Animated bars when playing",
+                            icon: "waveform",
+                            color: .cyan,
+                            isOn: $showMusicVisualizer
+                        )
+
+                        Divider().padding(.horizontal)
+
+                        SettingsPickerRow(
+                            title: "Visualizer Color",
+                            subtitle: "Color of the bars",
+                            icon: "paintpalette.fill",
+                            color: .purple,
+                            selection: $musicVisualizerColor,
+                            options: [
+                                ("green", "Green"),
+                                ("blue", "Blue"),
+                                ("pink", "Pink"),
+                                ("rainbow", "Rainbow")
+                            ]
+                        )
+                    }
+
+                    SettingsSection(title: "Supported Apps") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            SupportedAppRow(name: "Apple Music", icon: "music.quarternote.3")
+                            SupportedAppRow(name: "Spotify", icon: "music.note")
+                            SupportedAppRow(name: "Safari", icon: "safari")
+                            SupportedAppRow(name: "Chrome", icon: "globe")
+                            SupportedAppRow(name: "Firefox", icon: "flame")
+                            SupportedAppRow(name: "TIDAL", icon: "waveform")
+                        }
+                        .padding()
+                    }
+                }
+
+                Spacer()
+            }
+            .padding(24)
+        }
+    }
+}
+
+struct SupportedAppRow: View {
+    let name: String
+    let icon: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+            Text(name)
+                .font(.system(size: 13))
+            Spacer()
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        }
+    }
+}
+
+// MARK: - About Settings
+
+struct AboutSettingsView: View {
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                // App Icon & Name
+                VStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 24)
+                            .fill(
+                                LinearGradient(
+                                    colors: [.purple, .blue, .cyan],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 100, height: 100)
+
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 40, weight: .medium))
+                            .foregroundStyle(.white)
+                    }
+
+                    Text("NotchMac")
+                        .font(.system(size: 28, weight: .bold))
+
+                    Text("Dynamic Island for macOS")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+
+                    Text("Version 1.0.0")
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 4)
+                        .background(Color.secondary.opacity(0.2))
+                        .cornerRadius(8)
+                }
+                .padding(.top, 20)
+
+                // Links Section
+                SettingsSection(title: "Links") {
+                    Link(destination: URL(string: "https://github.com/kozhydlo/NotchMac")!) {
+                        HStack {
+                            Image(systemName: "link")
+                                .foregroundStyle(.blue)
+                            Text("GitHub Repository")
+                            Spacer()
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding()
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider().padding(.horizontal)
+
+                    Link(destination: URL(string: "https://kozhydlo.vercel.app")!) {
+                        HStack {
+                            Image(systemName: "person.fill")
+                                .foregroundStyle(.purple)
+                            VStack(alignment: .leading) {
+                                Text("Developer")
+                                Text("Kozhydlo Mark")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding()
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                // Quit Button
+                Button(action: { NSApp.terminate(nil) }) {
                     HStack {
-                        Text("Version")
-                        Spacer()
-                        Text("1.0.0")
-                            .foregroundStyle(.secondary)
-                    }
-
-                    HStack {
-                        Text("Developer")
-                        Spacer()
-                        Text("You")
-                            .foregroundStyle(.secondary)
-                    }
-                } header: {
-                    Text("App Info")
-                }
-
-                Section {
-                    Button("Quit Dynamic Island") {
-                        NSApp.terminate(nil)
+                        Image(systemName: "power")
+                        Text("Quit NotchMac")
                     }
                     .foregroundStyle(.red)
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 20)
+                    .background(Color.red.opacity(0.1))
+                    .cornerRadius(10)
+                }
+                .buttonStyle(.plain)
+
+                Text("Made with ❤️ in Ukraine")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+            }
+            .padding(24)
+        }
+    }
+}
+
+// MARK: - Settings Components
+
+struct SettingsHeader: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 24))
+                .foregroundStyle(color)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 20, weight: .semibold))
+                Text(subtitle)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.bottom, 8)
+    }
+}
+
+struct SettingsSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title.uppercased())
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 4)
+
+            VStack(spacing: 0) {
+                content
+            }
+            .background(Color(NSColor.controlBackgroundColor))
+            .cornerRadius(12)
+        }
+    }
+}
+
+struct SettingsToggleRow: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let color: Color
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 16))
+                    .foregroundStyle(color)
+                    .frame(width: 28, height: 28)
+                    .background(color.opacity(0.15))
+                    .cornerRadius(6)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .medium))
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
             }
-            .formStyle(.grouped)
-            .tabItem {
-                Label("About", systemImage: "info.circle")
-            }
         }
-        .frame(width: 420, height: 340)
+        .toggleStyle(.switch)
+        .padding(12)
+    }
+}
+
+struct SettingsPickerRow<T: Hashable>: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let color: Color
+    @Binding var selection: T
+    let options: [(T, String)]
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 16))
+                .foregroundStyle(color)
+                .frame(width: 28, height: 28)
+                .background(color.opacity(0.15))
+                .cornerRadius(6)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Picker("", selection: $selection) {
+                ForEach(options, id: \.0) { option in
+                    Text(option.1).tag(option.0)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 100)
+        }
+        .padding(12)
+    }
+}
+
+// MARK: - HUD Previews
+
+struct VolumePreview: View {
+    let style: String
+    let color: String
+    @State private var level: CGFloat = 0.7
+
+    var barColor: Color {
+        switch color {
+        case "blue": return .blue
+        case "green": return .green
+        case "rainbow": return .purple
+        default: return .white
+        }
     }
 
-    private func setDockVisibility(hidden: Bool) {
-        if hidden {
-            NSApp.setActivationPolicy(.accessory)
-        } else {
-            NSApp.setActivationPolicy(.regular)
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "speaker.wave.2.fill")
+                .font(.system(size: 18))
+                .foregroundStyle(barColor)
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: style == "minimal" ? 2 : 4)
+                        .fill(barColor.opacity(0.2))
+                    RoundedRectangle(cornerRadius: style == "minimal" ? 2 : 4)
+                        .fill(barColor)
+                        .frame(width: geo.size.width * level)
+                }
+            }
+            .frame(height: style == "minimal" ? 4 : 8)
+
+            Text("\(Int(level * 100))")
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .foregroundStyle(barColor)
+                .frame(width: 30)
         }
+        .padding()
+        .background(Color.black)
+        .cornerRadius(12)
+    }
+}
+
+struct BrightnessPreview: View {
+    let style: String
+    let color: String
+    @State private var level: CGFloat = 0.65
+
+    var barColor: Color {
+        switch color {
+        case "orange": return .orange
+        case "white": return .white
+        case "rainbow": return .pink
+        default: return .yellow
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "sun.max.fill")
+                .font(.system(size: 18))
+                .foregroundStyle(barColor)
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: style == "minimal" ? 2 : 4)
+                        .fill(barColor.opacity(0.2))
+                    RoundedRectangle(cornerRadius: style == "minimal" ? 2 : 4)
+                        .fill(barColor)
+                        .frame(width: geo.size.width * level)
+                }
+            }
+            .frame(height: style == "minimal" ? 4 : 8)
+
+            Text("\(Int(level * 100))")
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .foregroundStyle(barColor)
+                .frame(width: 30)
+        }
+        .padding()
+        .background(Color.black)
+        .cornerRadius(12)
     }
 }
 
@@ -611,14 +1321,10 @@ struct SettingsView: View {
 
 enum LaunchAtLogin {
     static func setEnabled(_ enabled: Bool) {
-        let bundleId = Bundle.main.bundleIdentifier ?? ""
-        if enabled {
-            // Add to login items using SMAppService (macOS 13+)
-            if #available(macOS 13.0, *) {
+        if #available(macOS 13.0, *) {
+            if enabled {
                 try? SMAppService.mainApp.register()
-            }
-        } else {
-            if #available(macOS 13.0, *) {
+            } else {
                 try? SMAppService.mainApp.unregister()
             }
         }

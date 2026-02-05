@@ -1,0 +1,15 @@
+.
+├── Assets.xcassets
+│   ├── AccentColor.colorset
+│   │   └── Contents.json
+│   ├── AppIcon.appiconset
+│   │   └── Contents.json
+│   └── Contents.json
+├── IslandView.swift
+├── IslandWindowController.swift
+├── MediaKeyManager.swift
+├── MyDynamicIslandApp.swift
+├── NotchShape.swift
+└── structure.txt
+
+4 directories, 9 files

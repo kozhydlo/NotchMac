@@ -66,16 +66,21 @@ struct NotchView: View {
                 // Expanded content
                 if state.isExpanded {
                     expandedContent
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                        .transition(
+                            .asymmetric(
+                                insertion: .opacity.combined(with: .scale(scale: 0.8, anchor: .top)).combined(with: .move(edge: .top)),
+                                removal: .opacity.combined(with: .scale(scale: 0.9, anchor: .top))
+                            )
+                        )
                 }
             }
         }
         .frame(width: notchSize.width, height: notchSize.height)
-        .scaleEffect(state.isHovered && !state.isExpanded ? 1.05 : 1.0, anchor: .top)
-        .shadow(radius: state.isHovered ? 4 : 0)
-        .animation(.spring(duration: 0.35, bounce: 0.2), value: state.isExpanded)
-        .animation(.easeOut(duration: 0.15), value: state.isHovered)
-        .animation(.easeOut(duration: 0.2), value: state.hud)
+        .scaleEffect(state.isHovered && !state.isExpanded ? 1.08 : 1.0, anchor: .top)
+        .shadow(color: .black.opacity(0.3), radius: state.isExpanded ? 20 : (state.isHovered ? 8 : 0), y: state.isExpanded ? 10 : 0)
+        .animation(.spring(duration: 0.5, bounce: 0.35, blendDuration: 0.25), value: state.isExpanded)
+        .animation(.spring(duration: 0.25, bounce: 0.4), value: state.isHovered)
+        .animation(.spring(duration: 0.3, bounce: 0.2), value: state.hud)
         .contentShape(Rectangle())
         .onTapGesture(count: 1) { handleTap() }
         .onHover { handleHover($0) }
@@ -188,88 +193,113 @@ struct NotchView: View {
 
     private func volumeHUD(level: CGFloat, muted: Bool) -> some View {
         let displayLevel = muted ? 0 : level
+        let style = UserDefaults.standard.string(forKey: "volumeHUDStyle") ?? "modern"
+        let colorName = UserDefaults.standard.string(forKey: "volumeHUDColor") ?? "white"
+        let showPercent = UserDefaults.standard.object(forKey: "volumeShowPercent") as? Bool ?? true
+
+        let barColor: Color = {
+            switch colorName {
+            case "blue": return .blue
+            case "green": return .green
+            case "rainbow": return .purple
+            default: return .white
+            }
+        }()
+
+        let barHeight: CGFloat = style == "minimal" ? 4 : 8
+        let cornerRadius: CGFloat = style == "minimal" ? 2 : 4
 
         return HStack(spacing: 12) {
-            // Icon with glow effect
             Image(systemName: muted ? "speaker.slash.fill" : volumeIconFor(level))
-                .font(.system(size: 20, weight: .medium))
-                .foregroundStyle(.white)
-                .shadow(color: .white.opacity(0.3), radius: 4)
+                .font(.system(size: style == "minimal" ? 16 : 20, weight: .medium))
+                .foregroundStyle(barColor)
+                .shadow(color: barColor.opacity(0.4), radius: 4)
                 .frame(width: 28)
 
-            // Beautiful progress bar
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    // Background track
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.white.opacity(0.15))
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .fill(barColor.opacity(0.15))
 
-                    // Filled portion with gradient
-                    RoundedRectangle(cornerRadius: 4)
+                    RoundedRectangle(cornerRadius: cornerRadius)
                         .fill(
                             LinearGradient(
-                                colors: [.white.opacity(0.9), .white],
+                                colors: [barColor.opacity(0.8), barColor],
                                 startPoint: .leading,
                                 endPoint: .trailing
                             )
                         )
                         .frame(width: max(8, geo.size.width * displayLevel))
-                        .shadow(color: .white.opacity(0.4), radius: 3, x: 0, y: 0)
+                        .shadow(color: barColor.opacity(0.5), radius: 4)
                 }
             }
-            .frame(height: 8)
+            .frame(height: barHeight)
 
-            // Percentage
-            Text("\(Int(displayLevel * 100))")
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .monospacedDigit()
-                .frame(width: 36, alignment: .trailing)
+            if showPercent {
+                Text("\(Int(displayLevel * 100))%")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(barColor)
+                    .monospacedDigit()
+                    .frame(width: 44, alignment: .trailing)
+            }
         }
         .frame(height: 36)
-        .animation(.easeOut(duration: 0.15), value: displayLevel)
+        .animation(.spring(duration: 0.2), value: displayLevel)
     }
 
     private func brightnessHUD(level: CGFloat) -> some View {
-        HStack(spacing: 12) {
-            // Icon with warm glow
+        let style = UserDefaults.standard.string(forKey: "brightnessHUDStyle") ?? "modern"
+        let colorName = UserDefaults.standard.string(forKey: "brightnessHUDColor") ?? "yellow"
+        let showPercent = UserDefaults.standard.object(forKey: "brightnessShowPercent") as? Bool ?? true
+
+        let barColor: Color = {
+            switch colorName {
+            case "orange": return .orange
+            case "white": return .white
+            case "rainbow": return .pink
+            default: return .yellow
+            }
+        }()
+
+        let barHeight: CGFloat = style == "minimal" ? 4 : 8
+        let cornerRadius: CGFloat = style == "minimal" ? 2 : 4
+
+        return HStack(spacing: 12) {
             Image(systemName: level > 0.5 ? "sun.max.fill" : "sun.min.fill")
-                .font(.system(size: 20, weight: .medium))
-                .foregroundStyle(.yellow)
-                .shadow(color: .yellow.opacity(0.5), radius: 6)
+                .font(.system(size: style == "minimal" ? 16 : 20, weight: .medium))
+                .foregroundStyle(barColor)
+                .shadow(color: barColor.opacity(0.5), radius: 6)
                 .frame(width: 28)
 
-            // Beautiful progress bar with warm gradient
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    // Background track
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.yellow.opacity(0.15))
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .fill(barColor.opacity(0.15))
 
-                    // Filled portion with gradient
-                    RoundedRectangle(cornerRadius: 4)
+                    RoundedRectangle(cornerRadius: cornerRadius)
                         .fill(
                             LinearGradient(
-                                colors: [.orange, .yellow],
+                                colors: [barColor.opacity(0.7), barColor],
                                 startPoint: .leading,
                                 endPoint: .trailing
                             )
                         )
                         .frame(width: max(8, geo.size.width * level))
-                        .shadow(color: .yellow.opacity(0.5), radius: 4, x: 0, y: 0)
+                        .shadow(color: barColor.opacity(0.5), radius: 4)
                 }
             }
-            .frame(height: 8)
+            .frame(height: barHeight)
 
-            // Percentage
-            Text("\(Int(level * 100))")
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .foregroundStyle(.yellow)
-                .monospacedDigit()
-                .frame(width: 36, alignment: .trailing)
+            if showPercent {
+                Text("\(Int(level * 100))%")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(barColor)
+                    .monospacedDigit()
+                    .frame(width: 44, alignment: .trailing)
+            }
         }
         .frame(height: 36)
-        .animation(.easeOut(duration: 0.15), value: level)
+        .animation(.spring(duration: 0.2), value: level)
     }
 
     private func musicExpanded(app: String) -> some View {
@@ -313,95 +343,7 @@ struct NotchView: View {
     }
 
     private var defaultExpanded: some View {
-        HStack(spacing: 16) {
-            // Left: Time & Date
-            VStack(alignment: .leading, spacing: 2) {
-                Text(timeString)
-                    .font(.system(size: 28, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .monospacedDigit()
-
-                Text(dateString)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-
-            Spacer()
-
-            // Right: Quick Stats
-            HStack(spacing: 12) {
-                // Battery indicator
-                QuickStatView(
-                    icon: batteryIcon,
-                    value: "\(batteryLevel)%",
-                    color: batteryColor
-                )
-
-                // WiFi indicator
-                QuickStatView(
-                    icon: "wifi",
-                    value: wifiName,
-                    color: .cyan
-                )
-            }
-        }
-        .padding(.horizontal, 4)
-    }
-
-    // MARK: - Quick Stats Helpers
-
-    private var batteryLevel: Int {
-        let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue()
-        let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef] ?? []
-
-        for source in sources {
-            if let info = IOPSGetPowerSourceDescription(snapshot, source)?.takeUnretainedValue() as? [String: Any],
-               let capacity = info[kIOPSCurrentCapacityKey] as? Int {
-                return capacity
-            }
-        }
-        return 100
-    }
-
-    private var batteryIcon: String {
-        let level = batteryLevel
-        if level > 75 { return "battery.100" }
-        if level > 50 { return "battery.75" }
-        if level > 25 { return "battery.50" }
-        if level > 10 { return "battery.25" }
-        return "battery.0"
-    }
-
-    private var batteryColor: Color {
-        let level = batteryLevel
-        if level > 20 { return .green }
-        if level > 10 { return .orange }
-        return .red
-    }
-
-    private var wifiName: String {
-        // Get current WiFi name
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
-        process.arguments = ["-getairportnetwork", "en0"]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                let parts = output.components(separatedBy: ": ")
-                if parts.count > 1 {
-                    return String(parts[1].trimmingCharacters(in: .whitespacesAndNewlines).prefix(8))
-                }
-            }
-        } catch {}
-
-        return "Wi-Fi"
+        CalendarWidgetView()
     }
 
     // MARK: - Interactions
@@ -412,7 +354,7 @@ struct NotchView: View {
 
         NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
 
-        withAnimation {
+        withAnimation(.spring(duration: 0.5, bounce: 0.35)) {
             if state.isExpanded {
                 state.hud = .none
                 state.isExpanded = false
@@ -426,7 +368,7 @@ struct NotchView: View {
     private func handleHover(_ hovering: Bool) {
         hoverTimer?.invalidate()
 
-        withAnimation {
+        withAnimation(.spring(duration: 0.25, bounce: 0.4)) {
             state.isHovered = hovering
         }
 
@@ -435,7 +377,7 @@ struct NotchView: View {
                 DispatchQueue.main.async {
                     guard !self.state.isExpanded else { return }
                     NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-                    withAnimation {
+                    withAnimation(.spring(duration: 0.5, bounce: 0.35)) {
                         self.state.isExpanded = true
                     }
                     self.scheduleCollapse(delay: 4)
@@ -445,7 +387,7 @@ struct NotchView: View {
             hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in
                 DispatchQueue.main.async {
                     guard self.state.hud == .none else { return }
-                    withAnimation {
+                    withAnimation(.spring(duration: 0.4, bounce: 0.25)) {
                         self.state.isExpanded = false
                     }
                 }
@@ -456,7 +398,7 @@ struct NotchView: View {
     private func showHUD() {
         collapseTimer?.invalidate()
 
-        withAnimation {
+        withAnimation(.spring(duration: 0.4, bounce: 0.3)) {
             state.isExpanded = true
         }
 
@@ -467,7 +409,7 @@ struct NotchView: View {
         collapseTimer?.invalidate()
         collapseTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in
             DispatchQueue.main.async {
-                withAnimation {
+                withAnimation(.spring(duration: 0.4, bounce: 0.2)) {
                     self.state.hud = .none
                     self.state.isExpanded = false
                 }
@@ -543,25 +485,120 @@ struct NotchView: View {
     }
 }
 
-// MARK: - Quick Stat View
+// MARK: - Calendar Widget View
 
-struct QuickStatView: View {
-    let icon: String
-    let value: String
-    let color: Color
+struct CalendarWidgetView: View {
+    private let calendar = Calendar.current
+    private let today = Date()
+
+    private var currentDay: Int {
+        calendar.component(.day, from: today)
+    }
+
+    private var currentWeekday: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE"
+        return formatter.string(from: today)
+    }
+
+    private var currentMonth: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMMM"
+        return formatter.string(from: today)
+    }
+
+    private var timeString: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: today)
+    }
+
+    private var weekDays: [Date] {
+        let startOfWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today))!
+        return (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: startOfWeek) }
+    }
 
     var body: some View {
-        VStack(spacing: 3) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(color)
+        HStack(spacing: 14) {
+            // Left: Big date
+            VStack(alignment: .leading, spacing: 0) {
+                Text(currentWeekday)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
 
-            Text(value)
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.white.opacity(0.7))
-                .lineLimit(1)
+                Text("\(currentDay)")
+                    .font(.system(size: 32, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+
+                Text(currentMonth)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.orange)
+            }
+
+            // Divider
+            RoundedRectangle(cornerRadius: 1)
+                .fill(Color.white.opacity(0.15))
+                .frame(width: 1, height: 40)
+
+            // Right: Week view
+            HStack(spacing: 6) {
+                ForEach(weekDays, id: \.self) { date in
+                    let day = calendar.component(.day, from: date)
+                    let isToday = calendar.isDate(date, inSameDayAs: today)
+                    let weekdaySymbol = shortWeekday(for: date)
+
+                    VStack(spacing: 3) {
+                        Text(weekdaySymbol)
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.4))
+
+                        ZStack {
+                            if isToday {
+                                Circle()
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [.orange, .red],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
+                                    .frame(width: 22, height: 22)
+                            }
+
+                            Text("\(day)")
+                                .font(.system(size: 10, weight: isToday ? .bold : .medium, design: .rounded))
+                                .foregroundStyle(isToday ? .white : .white.opacity(0.7))
+                        }
+                    }
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            // Time
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(timeString)
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(.green)
+                        .frame(width: 6, height: 6)
+                    Text("Online")
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+            }
         }
-        .frame(width: 40)
+        .padding(.horizontal, 4)
+    }
+
+    private func shortWeekday(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EE"
+        return String(formatter.string(from: date).prefix(2)).uppercased()
     }
 }
 
@@ -754,6 +791,7 @@ struct VolumeSettingsView: View {
     @AppStorage("showVolumeHUD") private var showVolumeHUD = true
     @AppStorage("volumeHUDStyle") private var volumeHUDStyle = "modern"
     @AppStorage("volumeHUDColor") private var volumeHUDColor = "white"
+    @AppStorage("volumeShowPercent") private var volumeShowPercent = true
     @AppStorage("volumeAnimationSpeed") private var volumeAnimationSpeed = 0.15
 
     var body: some View {
@@ -801,6 +839,16 @@ struct VolumeSettingsView: View {
                                 ("rainbow", "Rainbow")
                             ]
                         )
+
+                        Divider().padding(.horizontal)
+
+                        SettingsToggleRow(
+                            title: "Show Percentage",
+                            subtitle: "Display volume level as %",
+                            icon: "percent",
+                            color: .cyan,
+                            isOn: $volumeShowPercent
+                        )
                     }
 
                     SettingsSection(title: "Animation") {
@@ -842,6 +890,7 @@ struct BrightnessSettingsView: View {
     @AppStorage("showBrightnessHUD") private var showBrightnessHUD = true
     @AppStorage("brightnessHUDStyle") private var brightnessHUDStyle = "modern"
     @AppStorage("brightnessHUDColor") private var brightnessHUDColor = "yellow"
+    @AppStorage("brightnessShowPercent") private var brightnessShowPercent = true
     @AppStorage("brightnessAnimationSpeed") private var brightnessAnimationSpeed = 0.15
 
     var body: some View {
@@ -888,6 +937,16 @@ struct BrightnessSettingsView: View {
                                 ("white", "White"),
                                 ("rainbow", "Rainbow")
                             ]
+                        )
+
+                        Divider().padding(.horizontal)
+
+                        SettingsToggleRow(
+                            title: "Show Percentage",
+                            subtitle: "Display brightness level as %",
+                            icon: "percent",
+                            color: .cyan,
+                            isOn: $brightnessShowPercent
                         )
                     }
 
@@ -1236,6 +1295,7 @@ struct SettingsPickerRow<T: Hashable>: View {
 struct VolumePreview: View {
     let style: String
     let color: String
+    @AppStorage("volumeShowPercent") private var showPercent = true
     @State private var level: CGFloat = 0.7
 
     var barColor: Color {
@@ -1264,10 +1324,12 @@ struct VolumePreview: View {
             }
             .frame(height: style == "minimal" ? 4 : 8)
 
-            Text("\(Int(level * 100))")
-                .font(.system(size: 14, weight: .bold, design: .rounded))
-                .foregroundStyle(barColor)
-                .frame(width: 30)
+            if showPercent {
+                Text("\(Int(level * 100))%")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(barColor)
+                    .frame(width: 40)
+            }
         }
         .padding()
         .background(Color.black)
@@ -1278,6 +1340,7 @@ struct VolumePreview: View {
 struct BrightnessPreview: View {
     let style: String
     let color: String
+    @AppStorage("brightnessShowPercent") private var showPercent = true
     @State private var level: CGFloat = 0.65
 
     var barColor: Color {
@@ -1306,10 +1369,12 @@ struct BrightnessPreview: View {
             }
             .frame(height: style == "minimal" ? 4 : 8)
 
-            Text("\(Int(level * 100))")
-                .font(.system(size: 14, weight: .bold, design: .rounded))
-                .foregroundStyle(barColor)
-                .frame(width: 30)
+            if showPercent {
+                Text("\(Int(level * 100))%")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(barColor)
+                    .frame(width: 40)
+            }
         }
         .padding()
         .background(Color.black)

@@ -44,9 +44,25 @@ struct NotchView: View {
 
     private let audioTimer = Timer.publish(every: 0.12, on: .main, in: .common).autoconnect()
 
+    private var hudDisplayMode: String {
+        UserDefaults.standard.string(forKey: "hudDisplayMode") ?? "progressBar"
+    }
+
+    private var isMinimalMode: Bool {
+        hudDisplayMode == "minimal"
+    }
+
     private var notchSize: CGSize {
+        // Check if we should use minimal mode (no expansion)
+        let shouldExpand = !isMinimalMode || state.hud == .none
+
         // Base extra width
-        let baseExtra: CGFloat = state.isExpanded ? 100 : 16
+        var baseExtra: CGFloat = 16
+        if state.isExpanded && shouldExpand {
+            baseExtra = 100
+        } else if state.hud != .none && isMinimalMode {
+            baseExtra = 60 // Slightly wider for minimal HUD
+        }
 
         // Extra width for special states (lock, charging)
         var stateExtraWidth: CGFloat = 0
@@ -56,8 +72,11 @@ struct NotchView: View {
             stateExtraWidth = 80
         }
 
-        // Taller expanded view
-        let expandedHeight: CGFloat = state.isExpanded ? 75 : 0
+        // Taller expanded view (not for minimal mode HUD)
+        var expandedHeight: CGFloat = 0
+        if state.isExpanded && shouldExpand {
+            expandedHeight = 75
+        }
 
         return CGSize(
             width: state.notchWidth + baseExtra + stateExtraWidth,
@@ -139,9 +158,15 @@ struct NotchView: View {
     @ViewBuilder
     private var collapsedContent: some View {
         HStack(spacing: 0) {
-            // Left side - icon at the LEFT edge (outside hardware notch)
-            HStack {
-                leftIndicator
+            // Left side - icon or minimal HUD
+            HStack(spacing: 6) {
+                if isMinimalMode, case .volume(let level, let muted) = state.hud {
+                    MinimalVolumeHUD(level: level, muted: muted)
+                } else if isMinimalMode, case .brightness(let level) = state.hud {
+                    MinimalBrightnessHUD(level: level)
+                } else {
+                    leftIndicator
+                }
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity)
@@ -151,10 +176,22 @@ struct NotchView: View {
             Color.clear
                 .frame(width: state.notchWidth - 16)
 
-            // Right side - icon at the RIGHT edge (outside hardware notch)
-            HStack {
+            // Right side - icon or minimal HUD percentage
+            HStack(spacing: 6) {
                 Spacer(minLength: 0)
-                rightIndicator
+                if isMinimalMode, case .volume(let level, let muted) = state.hud {
+                    Text(muted ? "Mute" : "\(Int(level * 100))%")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .monospacedDigit()
+                } else if isMinimalMode, case .brightness(let level) = state.hud {
+                    Text("\(Int(level * 100))%")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundStyle(.yellow)
+                        .monospacedDigit()
+                } else {
+                    rightIndicator
+                }
             }
             .frame(maxWidth: .infinity)
             .padding(.trailing, 12)
@@ -285,115 +322,28 @@ struct NotchView: View {
         .padding(.vertical, 8)
     }
 
+    @ViewBuilder
     private func volumeHUD(level: CGFloat, muted: Bool) -> some View {
-        let displayLevel = muted ? 0 : level
-        let style = UserDefaults.standard.string(forKey: "volumeHUDStyle") ?? "modern"
-        let colorName = UserDefaults.standard.string(forKey: "volumeHUDColor") ?? "white"
-        let showPercent = UserDefaults.standard.object(forKey: "volumeShowPercent") as? Bool ?? true
+        let mode = hudDisplayMode
 
-        let barColor: Color = {
-            switch colorName {
-            case "blue": return .blue
-            case "green": return .green
-            case "rainbow": return .purple
-            default: return .white
-            }
-        }()
-
-        let barHeight: CGFloat = style == "minimal" ? 4 : 8
-        let cornerRadius: CGFloat = style == "minimal" ? 2 : 4
-
-        return HStack(spacing: 12) {
-            Image(systemName: muted ? "speaker.slash.fill" : volumeIconFor(level))
-                .font(.system(size: style == "minimal" ? 16 : 20, weight: .medium))
-                .foregroundStyle(barColor)
-                .shadow(color: barColor.opacity(0.4), radius: 4)
-                .frame(width: 28)
-
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .fill(barColor.opacity(0.15))
-
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .fill(
-                            LinearGradient(
-                                colors: [barColor.opacity(0.8), barColor],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(width: max(8, geo.size.width * displayLevel))
-                        .shadow(color: barColor.opacity(0.5), radius: 4)
-                }
-            }
-            .frame(height: barHeight)
-
-            if showPercent {
-                Text("\(Int(displayLevel * 100))%")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundStyle(barColor)
-                    .monospacedDigit()
-                    .frame(width: 44, alignment: .trailing)
-            }
+        switch mode {
+        case "notched":
+            NotchedVolumeHUD(level: level, muted: muted)
+        default: // progressBar
+            ProgressBarVolumeHUD(level: level, muted: muted)
         }
-        .frame(height: 36)
-        .animation(.spring(duration: 0.2), value: displayLevel)
     }
 
+    @ViewBuilder
     private func brightnessHUD(level: CGFloat) -> some View {
-        let style = UserDefaults.standard.string(forKey: "brightnessHUDStyle") ?? "modern"
-        let colorName = UserDefaults.standard.string(forKey: "brightnessHUDColor") ?? "yellow"
-        let showPercent = UserDefaults.standard.object(forKey: "brightnessShowPercent") as? Bool ?? true
+        let mode = hudDisplayMode
 
-        let barColor: Color = {
-            switch colorName {
-            case "orange": return .orange
-            case "white": return .white
-            case "rainbow": return .pink
-            default: return .yellow
-            }
-        }()
-
-        let barHeight: CGFloat = style == "minimal" ? 4 : 8
-        let cornerRadius: CGFloat = style == "minimal" ? 2 : 4
-
-        return HStack(spacing: 12) {
-            Image(systemName: level > 0.5 ? "sun.max.fill" : "sun.min.fill")
-                .font(.system(size: style == "minimal" ? 16 : 20, weight: .medium))
-                .foregroundStyle(barColor)
-                .shadow(color: barColor.opacity(0.5), radius: 6)
-                .frame(width: 28)
-
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .fill(barColor.opacity(0.15))
-
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .fill(
-                            LinearGradient(
-                                colors: [barColor.opacity(0.7), barColor],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(width: max(8, geo.size.width * level))
-                        .shadow(color: barColor.opacity(0.5), radius: 4)
-                }
-            }
-            .frame(height: barHeight)
-
-            if showPercent {
-                Text("\(Int(level * 100))%")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundStyle(barColor)
-                    .monospacedDigit()
-                    .frame(width: 44, alignment: .trailing)
-            }
+        switch mode {
+        case "notched":
+            NotchedBrightnessHUD(level: level)
+        default: // progressBar
+            ProgressBarBrightnessHUD(level: level)
         }
-        .frame(height: 36)
-        .animation(.spring(duration: 0.2), value: level)
     }
 
     private func musicExpanded(app: String) -> some View {
@@ -728,11 +678,14 @@ struct NotchView: View {
     private func showHUD() {
         collapseTimer?.invalidate()
 
-        withAnimation(.spring(duration: 0.4, bounce: 0.3)) {
-            state.isExpanded = true
+        // In minimal mode, don't expand - just show inline
+        if !isMinimalMode {
+            withAnimation(.spring(duration: 0.4, bounce: 0.3)) {
+                state.isExpanded = true
+            }
         }
 
-        scheduleCollapse(delay: 2)
+        scheduleCollapse(delay: isMinimalMode ? 1.5 : 2)
     }
 
     private func scheduleCollapse(delay: TimeInterval) {
@@ -741,7 +694,9 @@ struct NotchView: View {
             DispatchQueue.main.async {
                 withAnimation(.spring(duration: 0.4, bounce: 0.2)) {
                     self.state.hud = .none
-                    self.state.isExpanded = false
+                    if !self.isMinimalMode {
+                        self.state.isExpanded = false
+                    }
                 }
             }
         }
@@ -811,6 +766,312 @@ struct NotchView: View {
     private func animateAudioLevels() {
         withAnimation(.easeInOut(duration: 0.1)) {
             audioLevels = audioLevels.map { _ in CGFloat.random(in: 0.15...1.0) }
+        }
+    }
+}
+
+// MARK: - Minimal HUD Views
+
+struct MinimalVolumeHUD: View {
+    let level: CGFloat
+    let muted: Bool
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: muted ? "speaker.slash.fill" : volumeIcon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(muted ? .gray : .white)
+
+            // Mini progress bar
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.2))
+                    Capsule()
+                        .fill(Color.white)
+                        .frame(width: max(2, geo.size.width * (muted ? 0 : level)))
+                }
+            }
+            .frame(width: 30, height: 3)
+        }
+    }
+
+    private var volumeIcon: String {
+        if level < 0.33 { return "speaker.wave.1.fill" }
+        if level < 0.66 { return "speaker.wave.2.fill" }
+        return "speaker.wave.3.fill"
+    }
+}
+
+struct MinimalBrightnessHUD: View {
+    let level: CGFloat
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: level > 0.5 ? "sun.max.fill" : "sun.min.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.yellow)
+
+            // Mini progress bar
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.yellow.opacity(0.2))
+                    Capsule()
+                        .fill(Color.yellow)
+                        .frame(width: max(2, geo.size.width * level))
+                }
+            }
+            .frame(width: 30, height: 3)
+        }
+    }
+}
+
+// MARK: - Progress Bar Style HUD Views (Default)
+
+struct ProgressBarVolumeHUD: View {
+    let level: CGFloat
+    let muted: Bool
+
+    private var displayLevel: CGFloat { muted ? 0 : level }
+
+    private var barColor: Color {
+        let colorName = UserDefaults.standard.string(forKey: "volumeHUDColor") ?? "white"
+        switch colorName {
+        case "blue": return .blue
+        case "green": return .green
+        case "rainbow": return .purple
+        default: return .white
+        }
+    }
+
+    private var showPercent: Bool {
+        UserDefaults.standard.object(forKey: "volumeShowPercent") as? Bool ?? true
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: muted ? "speaker.slash.fill" : volumeIcon)
+                .font(.system(size: 20, weight: .medium))
+                .foregroundStyle(barColor)
+                .shadow(color: barColor.opacity(0.4), radius: 4)
+                .frame(width: 28)
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(barColor.opacity(0.15))
+
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(
+                            LinearGradient(
+                                colors: [barColor.opacity(0.8), barColor],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(8, geo.size.width * displayLevel))
+                        .shadow(color: barColor.opacity(0.5), radius: 4)
+                }
+            }
+            .frame(height: 8)
+
+            if showPercent {
+                Text("\(Int(displayLevel * 100))%")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(barColor)
+                    .monospacedDigit()
+                    .frame(width: 44, alignment: .trailing)
+            }
+        }
+        .frame(height: 36)
+        .animation(.spring(duration: 0.2), value: displayLevel)
+    }
+
+    private var volumeIcon: String {
+        if level < 0.33 { return "speaker.wave.1.fill" }
+        if level < 0.66 { return "speaker.wave.2.fill" }
+        return "speaker.wave.3.fill"
+    }
+}
+
+struct ProgressBarBrightnessHUD: View {
+    let level: CGFloat
+
+    private var barColor: Color {
+        let colorName = UserDefaults.standard.string(forKey: "brightnessHUDColor") ?? "yellow"
+        switch colorName {
+        case "orange": return .orange
+        case "white": return .white
+        case "rainbow": return .pink
+        default: return .yellow
+        }
+    }
+
+    private var showPercent: Bool {
+        UserDefaults.standard.object(forKey: "brightnessShowPercent") as? Bool ?? true
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: level > 0.5 ? "sun.max.fill" : "sun.min.fill")
+                .font(.system(size: 20, weight: .medium))
+                .foregroundStyle(barColor)
+                .shadow(color: barColor.opacity(0.5), radius: 6)
+                .frame(width: 28)
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(barColor.opacity(0.15))
+
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(
+                            LinearGradient(
+                                colors: [barColor.opacity(0.7), barColor],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(8, geo.size.width * level))
+                        .shadow(color: barColor.opacity(0.5), radius: 4)
+                }
+            }
+            .frame(height: 8)
+
+            if showPercent {
+                Text("\(Int(level * 100))%")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(barColor)
+                    .monospacedDigit()
+                    .frame(width: 44, alignment: .trailing)
+            }
+        }
+        .frame(height: 36)
+        .animation(.spring(duration: 0.2), value: level)
+    }
+}
+
+// MARK: - Notched Style HUD Views
+
+struct NotchedVolumeHUD: View {
+    let level: CGFloat
+    let muted: Bool
+    @State private var animate = false
+
+    private var displayLevel: CGFloat { muted ? 0 : level }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            // Left notch cutout style icon
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.white.opacity(0.1))
+                    .frame(width: 44, height: 44)
+
+                Image(systemName: muted ? "speaker.slash.fill" : volumeIcon)
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(.white)
+                    .scaleEffect(animate ? 1.1 : 1.0)
+            }
+
+            // Segmented volume bars
+            HStack(spacing: 3) {
+                ForEach(0..<10, id: \.self) { i in
+                    let threshold = CGFloat(i) / 10.0
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(displayLevel > threshold ? Color.white : Color.white.opacity(0.15))
+                        .frame(width: 6, height: 20 + CGFloat(i) * 1.5)
+                }
+            }
+
+            Spacer()
+
+            Text("\(Int(displayLevel * 100))%")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .monospacedDigit()
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                animate = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                withAnimation { animate = false }
+            }
+        }
+    }
+
+    private var volumeIcon: String {
+        if level < 0.33 { return "speaker.wave.1.fill" }
+        if level < 0.66 { return "speaker.wave.2.fill" }
+        return "speaker.wave.3.fill"
+    }
+}
+
+struct NotchedBrightnessHUD: View {
+    let level: CGFloat
+    @State private var animate = false
+
+    var body: some View {
+        HStack(spacing: 16) {
+            // Sun icon with glow
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [.yellow.opacity(0.3), .clear],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: 25
+                        )
+                    )
+                    .frame(width: 50, height: 50)
+                    .scaleEffect(animate ? 1.2 : 1.0)
+
+                Image(systemName: "sun.max.fill")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(.yellow)
+            }
+
+            // Gradient brightness bar
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    // Background with gradient hint
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(
+                            LinearGradient(
+                                colors: [.black, .gray.opacity(0.3)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+
+                    // Fill
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(
+                            LinearGradient(
+                                colors: [.orange, .yellow, .white],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(8, geo.size.width * level))
+                        .shadow(color: .yellow.opacity(0.5), radius: 8)
+                }
+            }
+            .frame(height: 12)
+
+            Text("\(Int(level * 100))%")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .foregroundStyle(.yellow)
+                .monospacedDigit()
+                .frame(width: 50)
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.3)) {
+                animate = true
+            }
         }
     }
 }
@@ -1018,117 +1279,123 @@ struct BatteryBarView: View {
 
 struct CalendarWidgetView: View {
     private let calendar = Calendar.current
-    private let today = Date()
+    @State private var currentTime = Date()
+
+    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var currentDay: Int {
-        calendar.component(.day, from: today)
+        calendar.component(.day, from: currentTime)
     }
 
     private var currentWeekday: String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "EEEE"
-        return formatter.string(from: today)
+        formatter.dateFormat = "EEE"
+        return formatter.string(from: currentTime).uppercased()
     }
 
     private var currentMonth: String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "MMMM"
-        return formatter.string(from: today)
+        formatter.dateFormat = "MMM"
+        return formatter.string(from: currentTime).uppercased()
+    }
+
+    private var currentYear: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy"
+        return formatter.string(from: currentTime)
     }
 
     private var timeString: String {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
-        return formatter.string(from: today)
+        return formatter.string(from: currentTime)
     }
 
-    private var dateString: String {
+    private var secondsString: String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "d MMM, yyyy"
-        return formatter.string(from: today)
-    }
-
-    private var weekDays: [Date] {
-        let startOfWeek = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today))!
-        return (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: startOfWeek) }
+        formatter.dateFormat = "ss"
+        return formatter.string(from: currentTime)
     }
 
     var body: some View {
-        HStack(spacing: 14) {
-            // Left: Big date
-            VStack(alignment: .leading, spacing: 0) {
-                Text(currentWeekday)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.5))
+        HStack(spacing: 0) {
+            // Left: Date block with gradient accent
+            HStack(spacing: 12) {
+                // Day number with accent
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 1.0, green: 0.4, blue: 0.2),
+                                    Color(red: 1.0, green: 0.2, blue: 0.4)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 44, height: 44)
 
-                Text("\(currentDay)")
-                    .font(.system(size: 32, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
+                    Text("\(currentDay)")
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                }
 
-                Text(currentMonth)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.orange)
-            }
+                // Month and weekday
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(currentWeekday)
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.9))
 
-            // Divider
-            RoundedRectangle(cornerRadius: 1)
-                .fill(Color.white.opacity(0.15))
-                .frame(width: 1, height: 40)
-
-            // Right: Week view
-            HStack(spacing: 6) {
-                ForEach(weekDays, id: \.self) { date in
-                    let day = calendar.component(.day, from: date)
-                    let isToday = calendar.isDate(date, inSameDayAs: today)
-                    let weekdaySymbol = shortWeekday(for: date)
-
-                    VStack(spacing: 3) {
-                        Text(weekdaySymbol)
-                            .font(.system(size: 8, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.4))
-
-                        ZStack {
-                            if isToday {
-                                Circle()
-                                    .fill(
-                                        LinearGradient(
-                                            colors: [.orange, .red],
-                                            startPoint: .topLeading,
-                                            endPoint: .bottomTrailing
-                                        )
-                                    )
-                                    .frame(width: 22, height: 22)
-                            }
-
-                            Text("\(day)")
-                                .font(.system(size: 10, weight: isToday ? .bold : .medium, design: .rounded))
-                                .foregroundStyle(isToday ? .white : .white.opacity(0.7))
-                        }
-                    }
+                    Text("\(currentMonth) \(currentYear)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.5))
                 }
             }
 
-            Spacer(minLength: 0)
+            Spacer()
 
-            // Time
-            VStack(alignment: .trailing, spacing: 4) {
+            // Center: Minimal week indicator dots
+            HStack(spacing: 6) {
+                ForEach(0..<7, id: \.self) { index in
+                    let dayOfWeek = calendar.component(.weekday, from: currentTime)
+                    let adjustedIndex = (index + 2) % 7 // Start from Monday
+                    let isToday = (dayOfWeek - 1) == adjustedIndex || (dayOfWeek == 1 && index == 6)
+
+                    Circle()
+                        .fill(isToday ?
+                            AnyShapeStyle(LinearGradient(
+                                colors: [Color(red: 1.0, green: 0.4, blue: 0.2), Color(red: 1.0, green: 0.2, blue: 0.4)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )) :
+                            AnyShapeStyle(Color.white.opacity(index < dayOfWeek - 1 || (dayOfWeek == 1 && index < 6) ? 0.4 : 0.15))
+                        )
+                        .frame(width: isToday ? 8 : 5, height: isToday ? 8 : 5)
+                        .animation(.spring(response: 0.3), value: isToday)
+                }
+            }
+
+            Spacer()
+
+            // Right: Live clock
+            HStack(alignment: .lastTextBaseline, spacing: 2) {
                 Text(timeString)
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                     .monospacedDigit()
 
-                Text(dateString)
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.5))
+                Text(secondsString)
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .monospacedDigit()
+                    .offset(y: -1)
             }
         }
-        .padding(.horizontal, 4)
-    }
-
-    private func shortWeekday(for date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "EE"
-        return String(formatter.string(from: date).prefix(2)).uppercased()
+        .padding(.horizontal, 8)
+        .onReceive(timer) { time in
+            currentTime = time
+        }
     }
 }
 
@@ -1152,11 +1419,12 @@ final class SettingsWindowController {
         let window = NSWindow(contentViewController: hostingController)
         window.title = "NotchMac Settings"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.setContentSize(NSSize(width: 600, height: 450))
-        window.minSize = NSSize(width: 550, height: 400)
+        window.setContentSize(NSSize(width: 750, height: 550))
+        window.minSize = NSSize(width: 650, height: 480)
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        window.titlebarAppearsTransparent = false
 
         self.window = window
     }
@@ -1169,6 +1437,7 @@ struct SettingsView: View {
 
     enum SettingsTab: String, CaseIterable {
         case general = "General"
+        case appearance = "Appearance"
         case volume = "Volume"
         case brightness = "Brightness"
         case battery = "Battery"
@@ -1178,6 +1447,7 @@ struct SettingsView: View {
         var icon: String {
             switch self {
             case .general: return "gearshape.fill"
+            case .appearance: return "paintpalette.fill"
             case .volume: return "speaker.wave.3.fill"
             case .brightness: return "sun.max.fill"
             case .battery: return "battery.100.bolt"
@@ -1189,6 +1459,7 @@ struct SettingsView: View {
         var color: Color {
             switch self {
             case .general: return .gray
+            case .appearance: return .indigo
             case .volume: return .blue
             case .brightness: return .orange
             case .battery: return .green
@@ -1200,22 +1471,46 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(SettingsTab.allCases, id: \.self, selection: $selectedTab) { tab in
-                Label {
-                    Text(tab.rawValue)
-                } icon: {
-                    Image(systemName: tab.icon)
-                        .foregroundStyle(tab.color)
+            VStack(spacing: 0) {
+                // Header
+                HStack {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.purple)
+                    Text("NotchMac")
+                        .font(.system(size: 16, weight: .bold))
                 }
-                .padding(.vertical, 4)
+                .padding(.vertical, 16)
+
+                Divider()
+
+                List(SettingsTab.allCases, id: \.self, selection: $selectedTab) { tab in
+                    HStack(spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(tab.color.opacity(0.15))
+                                .frame(width: 32, height: 32)
+
+                            Image(systemName: tab.icon)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(tab.color)
+                        }
+
+                        Text(tab.rawValue)
+                            .font(.system(size: 14, weight: .medium))
+                    }
+                    .padding(.vertical, 6)
+                }
+                .listStyle(.sidebar)
             }
-            .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 160, ideal: 180)
+            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
         } detail: {
             Group {
                 switch selectedTab {
                 case .general:
                     GeneralSettingsView()
+                case .appearance:
+                    AppearanceSettingsView()
                 case .volume:
                     VolumeSettingsView()
                 case .brightness:
@@ -1231,6 +1526,155 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(width: 600, height: 450)
+    }
+}
+
+// MARK: - Appearance Settings
+
+struct AppearanceSettingsView: View {
+    @AppStorage("hudDisplayMode") private var hudDisplayMode = "progressBar"
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                SettingsHeader(
+                    title: "Appearance",
+                    subtitle: "Customize how HUDs look",
+                    icon: "paintpalette.fill",
+                    color: .indigo
+                )
+
+                // HUD Display Mode
+                SettingsSection(title: "HUD Display Mode") {
+                    VStack(spacing: 0) {
+                        ForEach(["minimal", "progressBar", "notched"], id: \.self) { mode in
+                            HUDModeRow(
+                                mode: mode,
+                                isSelected: hudDisplayMode == mode,
+                                onSelect: { hudDisplayMode = mode }
+                            )
+
+                            if mode != "notched" {
+                                Divider().padding(.horizontal)
+                            }
+                        }
+                    }
+                }
+
+                // Preview
+                SettingsSection(title: "Preview") {
+                    VStack(spacing: 16) {
+                        // Volume Preview
+                        HStack {
+                            Text("Volume")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+
+                        switch hudDisplayMode {
+                        case "minimal":
+                            HStack {
+                                MinimalVolumeHUD(level: 0.65, muted: false)
+                                Spacer()
+                                Text("65%")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(.white)
+                            }
+                            .padding()
+                            .background(Color.black)
+                            .cornerRadius(12)
+
+                        case "notched":
+                            NotchedVolumeHUD(level: 0.65, muted: false)
+                                .padding()
+                                .background(Color.black)
+                                .cornerRadius(12)
+
+                        default:
+                            ProgressBarVolumeHUD(level: 0.65, muted: false)
+                                .padding()
+                                .background(Color.black)
+                                .cornerRadius(12)
+                        }
+                    }
+                    .padding()
+                }
+
+                Spacer()
+            }
+            .padding(24)
+        }
+    }
+}
+
+struct HUDModeRow: View {
+    let mode: String
+    let isSelected: Bool
+    let onSelect: () -> Void
+
+    var title: String {
+        switch mode {
+        case "minimal": return "Minimal"
+        case "progressBar": return "Progress Bar"
+        case "notched": return "Notched"
+        default: return mode
+        }
+    }
+
+    var description: String {
+        switch mode {
+        case "minimal": return "Compact inline display, no expansion"
+        case "progressBar": return "Classic style with progress bar"
+        case "notched": return "Premium segmented design"
+        default: return ""
+        }
+    }
+
+    var icon: String {
+        switch mode {
+        case "minimal": return "minus.rectangle"
+        case "progressBar": return "slider.horizontal.3"
+        case "notched": return "rectangle.split.3x1"
+        default: return "square"
+        }
+    }
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(isSelected ? Color.blue.opacity(0.2) : Color.gray.opacity(0.1))
+                        .frame(width: 44, height: 44)
+
+                    Image(systemName: icon)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(isSelected ? .blue : .secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.primary)
+
+                    Text(description)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.blue)
+                }
+            }
+            .padding(14)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 

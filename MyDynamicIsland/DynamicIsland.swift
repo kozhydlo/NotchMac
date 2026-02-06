@@ -118,6 +118,14 @@ enum HUDType: Equatable {
     case brightness(level: CGFloat)
 }
 
+// MARK: - HUD Display Mode
+
+enum HUDDisplayMode: String, CaseIterable {
+    case minimal = "Minimal"
+    case progressBar = "Progress Bar"
+    case notched = "Notched"
+}
+
 // MARK: - Battery State
 
 enum ChargingState: Equatable {

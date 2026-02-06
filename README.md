@@ -1,3 +1,5 @@
+![Preview](preview.png)
+
 # NotchMac
 
 A Dynamic Island-style notch replacement for MacBooks with notch displays. Transforms the black notch area into an interactive, functional space with beautiful animations and useful indicators.

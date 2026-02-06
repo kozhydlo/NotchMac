@@ -169,8 +169,10 @@ final class DynamicIsland {
     private var mediaKeyManager: MediaKeyManager?
     private var musicObservers: [NSObjectProtocol] = []
     private var lockObservers: [NSObjectProtocol] = []
+    private var lifecycleObservers: [NSObjectProtocol] = []
     private var batteryRunLoopSource: CFRunLoopSource?
     private var lastChargingState: Bool = false
+    private var isAppActive = true
 
     init() {
         setupWindow()
@@ -178,6 +180,38 @@ final class DynamicIsland {
         setupMediaKeys()
         setupLockDetection()
         setupBatteryMonitoring()
+        setupLifecycleObservers()
+    }
+
+    deinit {
+        // Cleanup lifecycle observers
+        lifecycleObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        nowPlayingTimer?.invalidate()
+    }
+
+    // MARK: - Lifecycle Observers
+
+    private func setupLifecycleObservers() {
+        // Pause non-essential monitoring when displays sleep
+        lifecycleObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: NSWorkspace.screensDidSleepNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.pauseMonitoring()
+            }
+        )
+
+        lifecycleObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: NSWorkspace.screensDidWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.resumeMonitoring()
+            }
+        )
     }
 
     private func setupWindow() {
@@ -323,12 +357,25 @@ final class DynamicIsland {
     // MARK: - Now Playing Monitor (for browsers)
 
     private var nowPlayingTimer: Timer?
+    private var isNowPlayingCheckPaused = false
 
     private func startNowPlayingMonitor() {
         // Monitor system Now Playing info for browsers
-        nowPlayingTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.checkNowPlaying()
+        // Uses longer interval (5s) to reduce CPU load - browser media isn't time-critical
+        nowPlayingTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            self?.checkNowPlayingIfNeeded()
         }
+    }
+
+    private func checkNowPlayingIfNeeded() {
+        // Skip if a dedicated music app is already playing
+        if case .music(let app) = state.activity {
+            if app == "Spotify" || app == "Music" || app == "TIDAL" || app == "Deezer" || app == "Amazon Music" {
+                return // Don't check - dedicated app has priority
+            }
+        }
+
+        checkNowPlaying()
     }
 
     private func checkNowPlaying() {
@@ -374,6 +421,19 @@ final class DynamicIsland {
                     }
                 }
             }
+        }
+    }
+
+    // MARK: - Lifecycle Management
+
+    func pauseMonitoring() {
+        nowPlayingTimer?.invalidate()
+        nowPlayingTimer = nil
+    }
+
+    func resumeMonitoring() {
+        if nowPlayingTimer == nil {
+            startNowPlayingMonitor()
         }
     }
 

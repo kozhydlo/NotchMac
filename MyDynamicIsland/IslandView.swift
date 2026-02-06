@@ -41,8 +41,12 @@ struct NotchView: View {
     @State private var hoverTimer: Timer?
     @State private var collapseTimer: Timer?
     @State private var audioLevels: [CGFloat] = [0.3, 0.5, 0.7, 0.4, 0.6]
+    @State private var audioTimerCancellable: AnyCancellable?
 
-    private let audioTimer = Timer.publish(every: 0.12, on: .main, in: .common).autoconnect()
+    // Audio timer only created when music is playing
+    private var audioTimerPublisher: AnyPublisher<Date, Never> {
+        Timer.publish(every: 0.15, on: .main, in: .common).autoconnect().eraseToAnyPublisher()
+    }
 
     private var hudDisplayMode: String {
         UserDefaults.standard.string(forKey: "hudDisplayMode") ?? "progressBar"
@@ -117,10 +121,22 @@ struct NotchView: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 1) { handleTap() }
         .onHover { handleHover($0) }
-        .onReceive(audioTimer) { _ in
-            if case .music = state.activity {
-                animateAudioLevels()
+        .onChange(of: state.activity) { _, newActivity in
+            // Start or stop audio animation timer based on music state
+            if case .music = newActivity {
+                startAudioTimer()
+            } else {
+                stopAudioTimer()
             }
+        }
+        .onAppear {
+            // Start audio timer if already playing music
+            if case .music = state.activity {
+                startAudioTimer()
+            }
+        }
+        .onDisappear {
+            stopAudioTimer()
         }
         .onChange(of: state.hud) { _, newValue in
             if newValue != .none {
@@ -768,6 +784,21 @@ struct NotchView: View {
             audioLevels = audioLevels.map { _ in CGFloat.random(in: 0.15...1.0) }
         }
     }
+
+    // MARK: - Audio Timer Control (Performance Optimization)
+
+    private func startAudioTimer() {
+        guard audioTimerCancellable == nil else { return }
+        audioTimerCancellable = audioTimerPublisher
+            .sink { [self] _ in
+                animateAudioLevels()
+            }
+    }
+
+    private func stopAudioTimer() {
+        audioTimerCancellable?.cancel()
+        audioTimerCancellable = nil
+    }
 }
 
 // MARK: - Minimal HUD Views
@@ -1280,8 +1311,12 @@ struct BatteryBarView: View {
 struct CalendarWidgetView: View {
     private let calendar = Calendar.current
     @State private var currentTime = Date()
+    @State private var timerCancellable: AnyCancellable?
 
-    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    // Timer publisher - only subscribed when view is visible
+    private var timerPublisher: AnyPublisher<Date, Never> {
+        Timer.publish(every: 1, on: .main, in: .common).autoconnect().eraseToAnyPublisher()
+    }
 
     private var currentDay: Int {
         calendar.component(.day, from: currentTime)
@@ -1393,8 +1428,17 @@ struct CalendarWidgetView: View {
             }
         }
         .padding(.horizontal, 8)
-        .onReceive(timer) { time in
-            currentTime = time
+        .onAppear {
+            // Start timer when view appears
+            currentTime = Date()
+            timerCancellable = timerPublisher.sink { time in
+                currentTime = time
+            }
+        }
+        .onDisappear {
+            // Stop timer when view disappears to save resources
+            timerCancellable?.cancel()
+            timerCancellable = nil
         }
     }
 }

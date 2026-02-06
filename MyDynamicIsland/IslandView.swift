@@ -45,13 +45,23 @@ struct NotchView: View {
     private let audioTimer = Timer.publish(every: 0.12, on: .main, in: .common).autoconnect()
 
     private var notchSize: CGSize {
-        // Make notch much wider when locked so icons are visible outside hardware notch
-        let baseExtra: CGFloat = state.isExpanded ? 80 : 16
-        // Always add extra width when locked (even when expanded)
-        let lockExtraWidth: CGFloat = state.isScreenLocked ? 140 : 0
+        // Base extra width
+        let baseExtra: CGFloat = state.isExpanded ? 100 : 16
+
+        // Extra width for special states (lock, charging)
+        var stateExtraWidth: CGFloat = 0
+        if state.isScreenLocked {
+            stateExtraWidth = 140
+        } else if state.battery.isCharging || state.showChargingAnimation {
+            stateExtraWidth = 80
+        }
+
+        // Taller expanded view
+        let expandedHeight: CGFloat = state.isExpanded ? 75 : 0
+
         return CGSize(
-            width: state.notchWidth + baseExtra + lockExtraWidth,
-            height: state.notchHeight + (state.isExpanded ? 60 : 0)
+            width: state.notchWidth + baseExtra + stateExtraWidth,
+            height: state.notchHeight + expandedHeight
         )
     }
 
@@ -180,6 +190,10 @@ struct NotchView: View {
         }
     }
 
+    private var showBatteryIndicator: Bool {
+        UserDefaults.standard.object(forKey: "showBatteryIndicator") as? Bool ?? true
+    }
+
     @ViewBuilder
     private var rightIndicator: some View {
         // Lock state indicators (if enabled)
@@ -192,6 +206,18 @@ struct NotchView: View {
                 .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(.green)
                 .transition(.scale.combined(with: .opacity))
+        } else if state.showChargingAnimation && showBatteryIndicator {
+            // Charging animation
+            ChargingIndicator(level: state.battery.level)
+        } else if state.showUnplugAnimation && showBatteryIndicator {
+            // Unplug animation
+            Image(systemName: "bolt.slash.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.gray)
+                .transition(.scale.combined(with: .opacity))
+        } else if state.battery.isCharging && showBatteryIndicator {
+            // Show charging indicator when charging
+            ChargingIndicator(level: state.battery.level)
         } else if case .music = state.activity {
             // Audio visualizer
             HStack(spacing: 2) {
@@ -231,8 +257,13 @@ struct NotchView: View {
                 brightnessHUD(level: level)
 
             case .none:
-                // Check for unlock animation first (if enabled)
-                if state.showUnlockAnimation && showLockIndicator {
+                // Check for charging/unplug animations first
+                if state.showChargingAnimation && showBatteryIndicator {
+                    chargingExpanded
+                } else if state.showUnplugAnimation && showBatteryIndicator {
+                    unplugExpanded
+                // Check for unlock animation (if enabled)
+                } else if state.showUnlockAnimation && showLockIndicator {
                     unlockExpanded
                 } else if state.isScreenLocked && showLockIndicator {
                     lockedExpanded
@@ -508,6 +539,129 @@ struct NotchView: View {
         }
     }
 
+    // MARK: - Charging Expanded View
+
+    @State private var chargingBoltScale: CGFloat = 0.5
+    @State private var chargingGlow: Bool = false
+
+    private var chargingExpanded: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                // Glow effect
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [.green.opacity(0.4), .green.opacity(0.1), .clear],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: 35
+                        )
+                    )
+                    .frame(width: 60, height: 60)
+                    .scaleEffect(chargingGlow ? 1.3 : 1.0)
+                    .opacity(chargingGlow ? 0.5 : 0.8)
+
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 28, weight: .medium))
+                    .foregroundStyle(.green)
+                    .shadow(color: .green.opacity(0.7), radius: 10)
+                    .scaleEffect(chargingBoltScale)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Charging")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+
+                HStack(spacing: 8) {
+                    Text("\(state.battery.level)%")
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                        .foregroundStyle(.green)
+                        .monospacedDigit()
+
+                    // Battery bar
+                    BatteryBarView(level: state.battery.level, isCharging: true)
+                }
+            }
+
+            Spacer()
+        }
+        .onAppear {
+            withAnimation(.spring(duration: 0.5, bounce: 0.4)) {
+                chargingBoltScale = 1.2
+            }
+            withAnimation(.spring(duration: 0.3).delay(0.2)) {
+                chargingBoltScale = 1.0
+            }
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                chargingGlow = true
+            }
+        }
+        .onDisappear {
+            chargingBoltScale = 0.5
+            chargingGlow = false
+        }
+    }
+
+    // MARK: - Unplug Expanded View
+
+    @State private var unplugScale: CGFloat = 1.2
+
+    private var unplugExpanded: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(Color.gray.opacity(0.2))
+                    .frame(width: 50, height: 50)
+
+                Image(systemName: "powerplug.fill")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(.gray)
+                    .scaleEffect(unplugScale)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Unplugged")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+
+                HStack(spacing: 8) {
+                    Text("\(state.battery.level)%")
+                        .font(.system(size: 20, weight: .semibold, design: .rounded))
+                        .foregroundStyle(state.battery.level <= 20 ? .red : .white.opacity(0.7))
+                        .monospacedDigit()
+
+                    if let time = state.battery.timeRemaining, time > 0 {
+                        Text("• \(formatBatteryTime(time)) remaining")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+                }
+            }
+
+            Spacer()
+
+            BatteryBarView(level: state.battery.level, isCharging: false)
+        }
+        .onAppear {
+            withAnimation(.spring(duration: 0.4, bounce: 0.3)) {
+                unplugScale = 1.0
+            }
+        }
+        .onDisappear {
+            unplugScale = 1.2
+        }
+    }
+
+    private func formatBatteryTime(_ minutes: Int) -> String {
+        let hours = minutes / 60
+        let mins = minutes % 60
+        if hours > 0 {
+            return "\(hours)h \(mins)m"
+        }
+        return "\(mins)m"
+    }
+
     // MARK: - Interactions
 
     private func handleTap() {
@@ -716,6 +870,150 @@ struct LockPulsingDot: View {
     }
 }
 
+// MARK: - Charging Indicator (Collapsed)
+
+struct ChargingIndicator: View {
+    let level: Int
+    @State private var isAnimating = false
+
+    private var batteryColor: Color {
+        if level <= 20 { return .red }
+        if level <= 50 { return .orange }
+        return .green
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            // Battery icon with level
+            ZStack(alignment: .leading) {
+                // Battery outline
+                RoundedRectangle(cornerRadius: 2)
+                    .stroke(batteryColor, lineWidth: 1)
+                    .frame(width: 20, height: 10)
+
+                // Battery fill
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(batteryColor)
+                    .frame(width: max(2, 18 * CGFloat(level) / 100), height: 8)
+                    .padding(.leading, 1)
+
+                // Battery tip
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(batteryColor)
+                    .frame(width: 2, height: 5)
+                    .offset(x: 20)
+            }
+
+            // Bolt icon
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.green)
+                .opacity(isAnimating ? 1.0 : 0.4)
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) {
+                isAnimating = true
+            }
+        }
+    }
+}
+
+// MARK: - Battery Percentage View
+
+struct BatteryPercentageView: View {
+    let level: Int
+    let isCharging: Bool
+    @State private var boltAnimation = false
+
+    private var batteryColor: Color {
+        if level <= 20 { return .red }
+        if level <= 50 { return .orange }
+        return .green
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Text("\(level)%")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(batteryColor)
+                .monospacedDigit()
+
+            if isCharging {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.green)
+                    .opacity(boltAnimation ? 1.0 : 0.5)
+                    .onAppear {
+                        withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
+                            boltAnimation = true
+                        }
+                    }
+            }
+        }
+    }
+}
+
+// MARK: - Battery Bar View (for expanded)
+
+struct BatteryBarView: View {
+    let level: Int
+    let isCharging: Bool
+    @State private var animatedLevel: CGFloat = 0
+    @State private var pulseAnimation = false
+
+    private var batteryColor: Color {
+        if level <= 20 { return .red }
+        if level <= 50 { return .orange }
+        return .green
+    }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            // Background
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color.white.opacity(0.1))
+                .frame(width: 50, height: 20)
+
+            // Fill
+            RoundedRectangle(cornerRadius: 3)
+                .fill(
+                    LinearGradient(
+                        colors: isCharging ? [batteryColor.opacity(0.7), batteryColor] : [batteryColor],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .frame(width: max(4, 48 * animatedLevel / 100), height: 18)
+                .padding(.leading, 1)
+                .shadow(color: batteryColor.opacity(isCharging ? 0.6 : 0.3), radius: isCharging && pulseAnimation ? 6 : 2)
+
+            // Battery tip
+            RoundedRectangle(cornerRadius: 1)
+                .fill(batteryColor.opacity(0.6))
+                .frame(width: 3, height: 10)
+                .offset(x: 51)
+
+            // Charging bolt overlay
+            if isCharging {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .offset(x: 20)
+            }
+        }
+        .onAppear {
+            withAnimation(.spring(duration: 0.6)) {
+                animatedLevel = CGFloat(level)
+            }
+            if isCharging {
+                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                    pulseAnimation = true
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Calendar Widget View
 
 struct CalendarWidgetView: View {
@@ -741,6 +1039,12 @@ struct CalendarWidgetView: View {
     private var timeString: String {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
+        return formatter.string(from: today)
+    }
+
+    private var dateString: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "d MMM, yyyy"
         return formatter.string(from: today)
     }
 
@@ -807,20 +1111,15 @@ struct CalendarWidgetView: View {
             Spacer(minLength: 0)
 
             // Time
-            VStack(alignment: .trailing, spacing: 2) {
+            VStack(alignment: .trailing, spacing: 4) {
                 Text(timeString)
-                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                     .monospacedDigit()
 
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(.green)
-                        .frame(width: 6, height: 6)
-                    Text("Online")
-                        .font(.system(size: 8, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.5))
-                }
+                Text(dateString)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
             }
         }
         .padding(.horizontal, 4)
@@ -872,6 +1171,7 @@ struct SettingsView: View {
         case general = "General"
         case volume = "Volume"
         case brightness = "Brightness"
+        case battery = "Battery"
         case music = "Music"
         case about = "About"
 
@@ -880,6 +1180,7 @@ struct SettingsView: View {
             case .general: return "gearshape.fill"
             case .volume: return "speaker.wave.3.fill"
             case .brightness: return "sun.max.fill"
+            case .battery: return "battery.100.bolt"
             case .music: return "music.note"
             case .about: return "info.circle.fill"
             }
@@ -890,7 +1191,8 @@ struct SettingsView: View {
             case .general: return .gray
             case .volume: return .blue
             case .brightness: return .orange
-            case .music: return .green
+            case .battery: return .green
+            case .music: return .pink
             case .about: return .purple
             }
         }
@@ -918,6 +1220,8 @@ struct SettingsView: View {
                     VolumeSettingsView()
                 case .brightness:
                     BrightnessSettingsView()
+                case .battery:
+                    BatterySettingsView()
                 case .music:
                     MusicSettingsView()
                 case .about:
@@ -1237,6 +1541,144 @@ struct BrightnessSettingsView: View {
     }
 }
 
+// MARK: - Battery Settings
+
+struct BatterySettingsView: View {
+    @AppStorage("showBatteryIndicator") private var showBatteryIndicator = true
+    @AppStorage("chargingSoundEnabled") private var chargingSoundEnabled = true
+    @AppStorage("showChargingAnimation") private var showChargingAnimation = true
+    @AppStorage("lowBatteryWarning") private var lowBatteryWarning = true
+    @AppStorage("lowBatteryThreshold") private var lowBatteryThreshold = 20.0
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                SettingsHeader(title: "Battery & Power", subtitle: "Charging notifications", icon: "battery.100.bolt", color: .green)
+
+                SettingsSection(title: "General") {
+                    SettingsToggleRow(
+                        title: "Battery Indicator",
+                        subtitle: "Show battery status in notch",
+                        icon: "battery.75",
+                        color: .green,
+                        isOn: $showBatteryIndicator
+                    )
+                }
+
+                if showBatteryIndicator {
+                    SettingsSection(title: "Charging") {
+                        SettingsToggleRow(
+                            title: "Charging Animation",
+                            subtitle: "Show animation when plugged in",
+                            icon: "bolt.fill",
+                            color: .yellow,
+                            isOn: $showChargingAnimation
+                        )
+
+                        Divider().padding(.horizontal)
+
+                        SettingsToggleRow(
+                            title: "Charging Sound",
+                            subtitle: "Play sound on plug/unplug",
+                            icon: "speaker.wave.2.fill",
+                            color: .blue,
+                            isOn: $chargingSoundEnabled
+                        )
+                    }
+
+                    SettingsSection(title: "Low Battery") {
+                        SettingsToggleRow(
+                            title: "Low Battery Warning",
+                            subtitle: "Alert when battery is low",
+                            icon: "battery.25",
+                            color: .red,
+                            isOn: $lowBatteryWarning
+                        )
+
+                        if lowBatteryWarning {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Image(systemName: "percent")
+                                        .foregroundStyle(.orange)
+                                    Text("Warning Threshold")
+                                    Spacer()
+                                    Text("\(Int(lowBatteryThreshold))%")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal)
+                                .padding(.top, 12)
+
+                                Slider(value: $lowBatteryThreshold, in: 10...50, step: 5)
+                                    .padding(.horizontal)
+                                    .padding(.bottom, 12)
+                            }
+                        }
+                    }
+
+                    // Preview
+                    SettingsSection(title: "Preview") {
+                        BatteryPreview()
+                            .padding()
+                    }
+                }
+
+                Spacer()
+            }
+            .padding(24)
+        }
+    }
+}
+
+struct BatteryPreview: View {
+    @State private var previewLevel: CGFloat = 75
+    @State private var isCharging = true
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack(spacing: 16) {
+                // Battery icon
+                ZStack {
+                    Circle()
+                        .fill(Color.green.opacity(0.2))
+                        .frame(width: 50, height: 50)
+
+                    Image(systemName: isCharging ? "bolt.fill" : "battery.75")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.green)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(isCharging ? "Charging" : "On Battery")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+
+                    Text("\(Int(previewLevel))%")
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                        .foregroundStyle(.green)
+                }
+
+                Spacer()
+
+                BatteryBarView(level: Int(previewLevel), isCharging: isCharging)
+            }
+            .padding()
+            .background(Color.black)
+            .cornerRadius(12)
+
+            // Controls
+            HStack {
+                Toggle("Charging", isOn: $isCharging)
+                    .toggleStyle(.switch)
+
+                Spacer()
+
+                Slider(value: $previewLevel, in: 0...100, step: 5)
+                    .frame(width: 120)
+            }
+        }
+    }
+}
+
 // MARK: - Music Settings
 
 struct MusicSettingsView: View {
@@ -1247,7 +1689,7 @@ struct MusicSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                SettingsHeader(title: "Music Activity", subtitle: "Now playing settings", icon: "music.note", color: .green)
+                SettingsHeader(title: "Music Activity", subtitle: "Now playing settings", icon: "music.note", color: .pink)
 
                 SettingsSection(title: "General") {
                     SettingsToggleRow(

@@ -1,6 +1,7 @@
 import AppKit
 import AudioToolbox
 import Combine
+import IOKit.ps
 import SwiftUI
 
 // MARK: - Lock Screen Window Manager (SkyLight)
@@ -117,6 +118,21 @@ enum HUDType: Equatable {
     case brightness(level: CGFloat)
 }
 
+// MARK: - Battery State
+
+enum ChargingState: Equatable {
+    case unplugged
+    case charging
+    case full
+}
+
+struct BatteryInfo: Equatable {
+    var level: Int = 100
+    var isCharging: Bool = false
+    var chargingState: ChargingState = .unplugged
+    var timeRemaining: Int? = nil // minutes
+}
+
 // MARK: - Notch State
 
 final class NotchState: ObservableObject {
@@ -126,6 +142,11 @@ final class NotchState: ObservableObject {
     @Published var hud: HUDType = .none
     @Published var isScreenLocked: Bool = false
     @Published var showUnlockAnimation: Bool = false
+
+    // Battery
+    @Published var battery: BatteryInfo = BatteryInfo()
+    @Published var showChargingAnimation: Bool = false
+    @Published var showUnplugAnimation: Bool = false
 
     // Notch dimensions
     @Published var notchWidth: CGFloat = 200
@@ -140,12 +161,15 @@ final class DynamicIsland {
     private var mediaKeyManager: MediaKeyManager?
     private var musicObservers: [NSObjectProtocol] = []
     private var lockObservers: [NSObjectProtocol] = []
+    private var batteryRunLoopSource: CFRunLoopSource?
+    private var lastChargingState: Bool = false
 
     init() {
         setupWindow()
         setupMusicDetection()
         setupMediaKeys()
         setupLockDetection()
+        setupBatteryMonitoring()
     }
 
     private func setupWindow() {
@@ -434,6 +458,193 @@ final class DynamicIsland {
             sound.play()
         } else {
             // Fallback to system sound
+            AudioServicesPlaySystemSound(1057)
+        }
+    }
+
+    // MARK: - Battery Monitoring
+
+    private var showBatteryIndicator: Bool {
+        UserDefaults.standard.object(forKey: "showBatteryIndicator") as? Bool ?? true
+    }
+
+    private func setupBatteryMonitoring() {
+        // Get initial battery state
+        updateBatteryInfo()
+        lastChargingState = state.battery.isCharging
+
+        // Event-driven: only listen for power source changes (no polling timer)
+        let context = Unmanaged.passUnretained(self).toOpaque()
+
+        if let source = IOPSNotificationCreateRunLoopSource({ context in
+            guard let context = context else { return }
+            let island = Unmanaged<DynamicIsland>.fromOpaque(context).takeUnretainedValue()
+            DispatchQueue.main.async {
+                island.checkBatteryChanges()
+            }
+        }, context)?.takeRetainedValue() {
+            batteryRunLoopSource = source
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+        }
+    }
+
+    private func checkBatteryChanges() {
+        guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef],
+              let source = sources.first,
+              let info = IOPSGetPowerSourceDescription(snapshot, source)?.takeUnretainedValue() as? [String: Any] else {
+            return
+        }
+
+        // Get current charging state SYNCHRONOUSLY
+        let powerSource = info[kIOPSPowerSourceStateKey] as? String
+        let isCharging = powerSource == kIOPSACPowerValue
+        let wasCharging = lastChargingState
+
+        // Update state on main thread
+        DispatchQueue.main.async {
+            // Battery level
+            if let capacity = info[kIOPSCurrentCapacityKey] as? Int {
+                self.state.battery.level = capacity
+            }
+
+            self.state.battery.isCharging = isCharging
+
+            // Determine charging state
+            if let isCharged = info[kIOPSIsChargedKey] as? Bool, isCharged {
+                self.state.battery.chargingState = .full
+            } else if isCharging {
+                self.state.battery.chargingState = .charging
+            } else {
+                self.state.battery.chargingState = .unplugged
+            }
+
+            // Time remaining
+            if let timeRemaining = info[kIOPSTimeToEmptyKey] as? Int, timeRemaining > 0 {
+                self.state.battery.timeRemaining = timeRemaining
+            } else if let timeToFull = info[kIOPSTimeToFullChargeKey] as? Int, timeToFull > 0 {
+                self.state.battery.timeRemaining = timeToFull
+            } else {
+                self.state.battery.timeRemaining = nil
+            }
+
+            // Detect plug/unplug changes
+            guard self.showBatteryIndicator else { return }
+
+            if isCharging && !wasCharging {
+                // Just plugged in
+                self.triggerChargingStarted()
+            } else if !isCharging && wasCharging {
+                // Just unplugged
+                self.triggerChargingStopped()
+            }
+        }
+
+        // Update last state (synchronously, before next callback)
+        lastChargingState = isCharging
+    }
+
+    private func updateBatteryInfo() {
+        guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef],
+              let source = sources.first,
+              let info = IOPSGetPowerSourceDescription(snapshot, source)?.takeUnretainedValue() as? [String: Any] else {
+            return
+        }
+
+        let powerSource = info[kIOPSPowerSourceStateKey] as? String
+        let isCharging = powerSource == kIOPSACPowerValue
+
+        DispatchQueue.main.async {
+            if let capacity = info[kIOPSCurrentCapacityKey] as? Int {
+                self.state.battery.level = capacity
+            }
+
+            self.state.battery.isCharging = isCharging
+
+            if let isCharged = info[kIOPSIsChargedKey] as? Bool, isCharged {
+                self.state.battery.chargingState = .full
+            } else if isCharging {
+                self.state.battery.chargingState = .charging
+            } else {
+                self.state.battery.chargingState = .unplugged
+            }
+
+            if let timeRemaining = info[kIOPSTimeToEmptyKey] as? Int, timeRemaining > 0 {
+                self.state.battery.timeRemaining = timeRemaining
+            } else if let timeToFull = info[kIOPSTimeToFullChargeKey] as? Int, timeToFull > 0 {
+                self.state.battery.timeRemaining = timeToFull
+            } else {
+                self.state.battery.timeRemaining = nil
+            }
+        }
+
+        // Update last state for initial setup
+        lastChargingState = isCharging
+    }
+
+    private func triggerChargingStarted() {
+        // Already on main thread
+        state.showChargingAnimation = true
+        state.isExpanded = true
+
+        // Haptic feedback
+        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+
+        // Play charging sound
+        playChargingSound()
+
+        // Hide animation after delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            self.state.showChargingAnimation = false
+            if !self.state.isHovered {
+                self.state.isExpanded = false
+            }
+        }
+    }
+
+    private func triggerChargingStopped() {
+        // Already on main thread
+        state.showUnplugAnimation = true
+        state.isExpanded = true
+
+        // Haptic feedback
+        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+
+        // Play unplug sound
+        playUnplugSound()
+
+        // Hide animation after delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            self.state.showUnplugAnimation = false
+            if !self.state.isHovered {
+                self.state.isExpanded = false
+            }
+        }
+    }
+
+    private func playChargingSound() {
+        let soundEnabled = UserDefaults.standard.object(forKey: "chargingSoundEnabled") as? Bool ?? true
+        guard soundEnabled else { return }
+
+        // Pleasant charging sound
+        if let sound = NSSound(named: "Blow") {
+            sound.volume = 0.4
+            sound.play()
+        } else {
+            AudioServicesPlaySystemSound(1004)
+        }
+    }
+
+    private func playUnplugSound() {
+        let soundEnabled = UserDefaults.standard.object(forKey: "chargingSoundEnabled") as? Bool ?? true
+        guard soundEnabled else { return }
+
+        // Subtle unplug sound
+        if let sound = NSSound(named: "Pop") {
+            sound.volume = 0.35
+            sound.play()
+        } else {
             AudioServicesPlaySystemSound(1057)
         }
     }

@@ -1,6 +1,77 @@
 import AppKit
+import AudioToolbox
 import Combine
 import SwiftUI
+
+// MARK: - Lock Screen Window Manager (SkyLight)
+
+final class LockScreenWindowManager {
+    static let shared: LockScreenWindowManager? = LockScreenWindowManager()
+
+    private enum SpaceLevel: Int32 {
+        case `default` = 0
+        case setupAssistant = 100
+        case securityAgent = 200
+        case screenLock = 300
+        case notificationCenterAtScreenLock = 400
+        case bootProgress = 500
+        case voiceOver = 600
+    }
+
+    private let connection: Int32
+    private let space: Int32
+
+    private let SLSMainConnectionID: @convention(c) () -> Int32
+    private let SLSSpaceCreate: @convention(c) (Int32, Int32, Int32) -> Int32
+    private let SLSSpaceDestroy: @convention(c) (Int32, Int32) -> Int32
+    private let SLSSpaceSetAbsoluteLevel: @convention(c) (Int32, Int32, Int32) -> Int32
+    private let SLSShowSpaces: @convention(c) (Int32, CFArray) -> Int32
+    private let SLSHideSpaces: @convention(c) (Int32, CFArray) -> Int32
+    private let SLSSpaceAddWindowsAndRemoveFromSpaces: @convention(c) (Int32, Int32, CFArray, Int32) -> Int32
+
+    private init?() {
+        guard let bundle = CFBundleCreate(
+            kCFAllocatorDefault,
+            NSURL(fileURLWithPath: "/System/Library/PrivateFrameworks/SkyLight.framework")
+        ) else { return nil }
+
+        guard let mainConnPtr = CFBundleGetFunctionPointerForName(bundle, "SLSMainConnectionID" as CFString) else { return nil }
+        SLSMainConnectionID = unsafeBitCast(mainConnPtr, to: (@convention(c) () -> Int32).self)
+
+        guard let createPtr = CFBundleGetFunctionPointerForName(bundle, "SLSSpaceCreate" as CFString) else { return nil }
+        SLSSpaceCreate = unsafeBitCast(createPtr, to: (@convention(c) (Int32, Int32, Int32) -> Int32).self)
+
+        guard let destroyPtr = CFBundleGetFunctionPointerForName(bundle, "SLSSpaceDestroy" as CFString) else { return nil }
+        SLSSpaceDestroy = unsafeBitCast(destroyPtr, to: (@convention(c) (Int32, Int32) -> Int32).self)
+
+        guard let setLevelPtr = CFBundleGetFunctionPointerForName(bundle, "SLSSpaceSetAbsoluteLevel" as CFString) else { return nil }
+        SLSSpaceSetAbsoluteLevel = unsafeBitCast(setLevelPtr, to: (@convention(c) (Int32, Int32, Int32) -> Int32).self)
+
+        guard let showPtr = CFBundleGetFunctionPointerForName(bundle, "SLSShowSpaces" as CFString) else { return nil }
+        SLSShowSpaces = unsafeBitCast(showPtr, to: (@convention(c) (Int32, CFArray) -> Int32).self)
+
+        guard let hidePtr = CFBundleGetFunctionPointerForName(bundle, "SLSHideSpaces" as CFString) else { return nil }
+        SLSHideSpaces = unsafeBitCast(hidePtr, to: (@convention(c) (Int32, CFArray) -> Int32).self)
+
+        guard let addPtr = CFBundleGetFunctionPointerForName(bundle, "SLSSpaceAddWindowsAndRemoveFromSpaces" as CFString) else { return nil }
+        SLSSpaceAddWindowsAndRemoveFromSpaces = unsafeBitCast(addPtr, to: (@convention(c) (Int32, Int32, CFArray, Int32) -> Int32).self)
+
+        connection = SLSMainConnectionID()
+        space = SLSSpaceCreate(connection, 1, 0)
+
+        _ = SLSSpaceSetAbsoluteLevel(connection, space, SpaceLevel.notificationCenterAtScreenLock.rawValue)
+        _ = SLSShowSpaces(connection, [space] as CFArray)
+    }
+
+    deinit {
+        _ = SLSHideSpaces(connection, [space] as CFArray)
+        _ = SLSSpaceDestroy(connection, space)
+    }
+
+    func moveWindowToLockScreen(_ window: NSWindow) {
+        _ = SLSSpaceAddWindowsAndRemoveFromSpaces(connection, space, [window.windowNumber] as CFArray, 7)
+    }
+}
 
 // MARK: - Panel
 
@@ -22,6 +93,7 @@ final class NotchPanel: NSPanel {
         hasShadow = false
 
         collectionBehavior = [.fullScreenAuxiliary, .stationary, .canJoinAllSpaces, .ignoresCycle]
+        canBecomeVisibleWithoutLogin = true
         level = .mainMenu + 1
     }
 
@@ -52,6 +124,8 @@ final class NotchState: ObservableObject {
     @Published var isExpanded: Bool = false
     @Published var isHovered: Bool = false
     @Published var hud: HUDType = .none
+    @Published var isScreenLocked: Bool = false
+    @Published var showUnlockAnimation: Bool = false
 
     // Notch dimensions
     @Published var notchWidth: CGFloat = 200
@@ -65,11 +139,13 @@ final class DynamicIsland {
     private let state = NotchState()
     private var mediaKeyManager: MediaKeyManager?
     private var musicObservers: [NSObjectProtocol] = []
+    private var lockObservers: [NSObjectProtocol] = []
 
     init() {
         setupWindow()
         setupMusicDetection()
         setupMediaKeys()
+        setupLockDetection()
     }
 
     private func setupWindow() {
@@ -91,6 +167,9 @@ final class DynamicIsland {
 
         panel.setFrame(screen.frame, display: true)
         panel.orderFrontRegardless()
+
+        // Move to lock screen space so it's visible when locked
+        LockScreenWindowManager.shared?.moveWindowToLockScreen(panel)
 
         self.panel = panel
 
@@ -271,5 +350,91 @@ final class DynamicIsland {
     private func setupMediaKeys() {
         mediaKeyManager = MediaKeyManager(state: state)
         mediaKeyManager?.start()
+    }
+
+    // MARK: - Lock Screen Detection
+
+    private func setupLockDetection() {
+        let center = DistributedNotificationCenter.default()
+
+        // Screen locked
+        lockObservers.append(center.addObserver(
+            forName: NSNotification.Name("com.apple.screenIsLocked"),
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.handleScreenLocked()
+        })
+
+        // Screen unlocked
+        lockObservers.append(center.addObserver(
+            forName: NSNotification.Name("com.apple.screenIsUnlocked"),
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.handleScreenUnlocked()
+        })
+    }
+
+    private var showLockIndicator: Bool {
+        UserDefaults.standard.object(forKey: "showLockIndicator") as? Bool ?? true
+    }
+
+    private func handleScreenLocked() {
+        DispatchQueue.main.async {
+            self.state.isScreenLocked = true
+            self.state.showUnlockAnimation = false
+        }
+    }
+
+    private func handleScreenUnlocked() {
+        DispatchQueue.main.async {
+            self.state.isScreenLocked = false
+
+            // Only show unlock animation if enabled
+            guard self.showLockIndicator else { return }
+
+            self.state.showUnlockAnimation = true
+
+            // Play unlock sound
+            self.playUnlockSound()
+
+            // Strong haptic feedback
+            NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+
+            // Second haptic after short delay for emphasis
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+            }
+
+            // Third haptic for extra "unlock feel"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            }
+
+            // Hide unlock animation after delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                self.state.showUnlockAnimation = false
+            }
+        }
+    }
+
+    private func playUnlockSound() {
+        // Check if sound is enabled in settings
+        let soundEnabled = UserDefaults.standard.object(forKey: "unlockSoundEnabled") as? Bool ?? true
+        guard soundEnabled else { return }
+
+        // Try Glass sound first (clean, pleasant)
+        if let sound = NSSound(named: "Glass") {
+            sound.volume = 0.4
+            sound.play()
+        } else if let sound = NSSound(named: "Blow") {
+            sound.volume = 0.35
+            sound.play()
+        } else if let sound = NSSound(named: "Pop") {
+            sound.volume = 0.4
+            sound.play()
+        } else {
+            // Fallback to system sound
+            AudioServicesPlaySystemSound(1057)
+        }
     }
 }

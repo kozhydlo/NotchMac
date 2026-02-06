@@ -45,8 +45,12 @@ struct NotchView: View {
     private let audioTimer = Timer.publish(every: 0.12, on: .main, in: .common).autoconnect()
 
     private var notchSize: CGSize {
-        CGSize(
-            width: state.notchWidth + (state.isExpanded ? 80 : 16),
+        // Make notch much wider when locked so icons are visible outside hardware notch
+        let baseExtra: CGFloat = state.isExpanded ? 80 : 16
+        // Always add extra width when locked (even when expanded)
+        let lockExtraWidth: CGFloat = state.isScreenLocked ? 140 : 0
+        return CGSize(
+            width: state.notchWidth + baseExtra + lockExtraWidth,
             height: state.notchHeight + (state.isExpanded ? 60 : 0)
         )
     }
@@ -94,6 +98,30 @@ struct NotchView: View {
                 showHUD()
             }
         }
+        .onChange(of: state.showUnlockAnimation) { _, newValue in
+            if newValue {
+                // Auto expand on unlock
+                withAnimation(.spring(duration: 0.5, bounce: 0.35)) {
+                    state.isExpanded = true
+                }
+                // Reset unlock animation state
+                unlockScale = 0.5
+                unlockOpacity = 0
+                // Auto collapse after showing unlock
+                scheduleCollapse(delay: 2.0)
+            }
+        }
+        .onChange(of: state.isScreenLocked) { _, isLocked in
+            withAnimation(.spring(duration: 0.3, bounce: 0.2)) {
+                if isLocked {
+                    // Optionally show locked state briefly
+                    state.isExpanded = true
+                    scheduleCollapse(delay: 1.5)
+                }
+            }
+        }
+        .animation(.spring(duration: 0.4, bounce: 0.3), value: state.isScreenLocked)
+        .animation(.spring(duration: 0.4, bounce: 0.3), value: state.showUnlockAnimation)
     }
 
     // MARK: - Collapsed Content
@@ -101,41 +129,70 @@ struct NotchView: View {
     @ViewBuilder
     private var collapsedContent: some View {
         HStack(spacing: 0) {
-            // Left side - icon
-            leftIndicator
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 14)
+            // Left side - icon at the LEFT edge (outside hardware notch)
+            HStack {
+                leftIndicator
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.leading, 12)
 
             // Center notch space (camera area)
             Color.clear
                 .frame(width: state.notchWidth - 16)
 
-            // Right side - visualizer/progress
-            rightIndicator
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .padding(.trailing, 14)
+            // Right side - icon at the RIGHT edge (outside hardware notch)
+            HStack {
+                Spacer(minLength: 0)
+                rightIndicator
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.trailing, 12)
         }
+    }
+
+    private var showLockIndicator: Bool {
+        UserDefaults.standard.object(forKey: "showLockIndicator") as? Bool ?? true
     }
 
     @ViewBuilder
     private var leftIndicator: some View {
-        // Only show activity indicators, NOT HUD (HUD shows in expanded view only)
-        if case .music(let app) = state.activity {
+        // Lock icon takes priority (if enabled) - ALWAYS show when locked
+        if state.isScreenLocked && showLockIndicator {
+            LockIconView()
+        } else if state.showUnlockAnimation && showLockIndicator {
+            // Unlock animation
+            Image(systemName: "lock.open.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.green)
+                .shadow(color: .green.opacity(0.8), radius: 6)
+                .transition(.scale.combined(with: .opacity))
+        } else if case .music(let app) = state.activity {
             Image(systemName: musicIcon(for: app))
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.green)
+                .transition(.scale.combined(with: .opacity))
         } else if case .timer = state.activity {
             Image(systemName: "timer")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.orange)
+                .transition(.scale.combined(with: .opacity))
         }
-        // HUD indicators removed - only show in expanded view
     }
 
     @ViewBuilder
     private var rightIndicator: some View {
-        // Only show activity indicators, NOT HUD
-        if case .music = state.activity {
+        // Lock state indicators (if enabled)
+        if state.isScreenLocked && showLockIndicator {
+            // Locked indicator - pulsing dot
+            LockPulsingDot()
+        } else if state.showUnlockAnimation && showLockIndicator {
+            // Unlock checkmark animation
+            Image(systemName: "checkmark")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.green)
+                .transition(.scale.combined(with: .opacity))
+        } else if case .music = state.activity {
             // Audio visualizer
             HStack(spacing: 2) {
                 ForEach(0..<5, id: \.self) { i in
@@ -159,7 +216,6 @@ struct NotchView: View {
                 }
             }
         }
-        // HUD mini bars removed - only show full HUD in expanded view
     }
 
     // MARK: - Expanded Content
@@ -175,15 +231,22 @@ struct NotchView: View {
                 brightnessHUD(level: level)
 
             case .none:
-                switch state.activity {
-                case .music(let app):
-                    musicExpanded(app: app)
+                // Check for unlock animation first (if enabled)
+                if state.showUnlockAnimation && showLockIndicator {
+                    unlockExpanded
+                } else if state.isScreenLocked && showLockIndicator {
+                    lockedExpanded
+                } else {
+                    switch state.activity {
+                    case .music(let app):
+                        musicExpanded(app: app)
 
-                case .timer(let remaining, _):
-                    timerExpanded(remaining: remaining)
+                    case .timer(let remaining, _):
+                        timerExpanded(remaining: remaining)
 
-                case .none:
-                    defaultExpanded
+                    case .none:
+                        defaultExpanded
+                    }
                 }
             }
         }
@@ -346,13 +409,114 @@ struct NotchView: View {
         CalendarWidgetView()
     }
 
+    @State private var lockPulse: Bool = false
+
+    private var lockedExpanded: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                // Glow effect
+                Circle()
+                    .fill(Color.orange.opacity(0.2))
+                    .frame(width: 44, height: 44)
+                    .scaleEffect(lockPulse ? 1.2 : 1.0)
+                    .opacity(lockPulse ? 0.5 : 0.8)
+
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(.orange)
+                    .shadow(color: .orange.opacity(0.5), radius: 6)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Mac Locked")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text("Touch ID or enter password")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+
+            Spacer()
+
+            // Pulsing indicator
+            Circle()
+                .fill(Color.orange)
+                .frame(width: 8, height: 8)
+                .shadow(color: .orange, radius: 4)
+                .scaleEffect(lockPulse ? 1.3 : 1.0)
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                lockPulse = true
+            }
+        }
+        .onDisappear {
+            lockPulse = false
+        }
+    }
+
+    @State private var unlockScale: CGFloat = 0.5
+    @State private var unlockOpacity: CGFloat = 0
+
+    private var unlockExpanded: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                // Success circle background
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [.green.opacity(0.3), .green.opacity(0.1), .clear],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: 30
+                        )
+                    )
+                    .frame(width: 50, height: 50)
+                    .scaleEffect(unlockScale)
+                    .opacity(unlockOpacity)
+
+                Image(systemName: "lock.open.fill")
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundStyle(.green)
+                    .shadow(color: .green.opacity(0.5), radius: 8)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Unlocked")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                Text("Welcome back!")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+
+            Spacer()
+
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 22))
+                .foregroundStyle(.green)
+                .scaleEffect(unlockScale)
+        }
+        .onAppear {
+            withAnimation(.spring(duration: 0.6, bounce: 0.5)) {
+                unlockScale = 1.2
+                unlockOpacity = 1
+            }
+            withAnimation(.spring(duration: 0.3, bounce: 0.2).delay(0.3)) {
+                unlockScale = 1.0
+            }
+        }
+    }
+
     // MARK: - Interactions
 
     private func handleTap() {
         hoverTimer?.invalidate()
         collapseTimer?.invalidate()
 
-        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+        if hapticEnabled {
+            NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+        }
 
         withAnimation(.spring(duration: 0.5, bounce: 0.35)) {
             if state.isExpanded {
@@ -365,8 +529,17 @@ struct NotchView: View {
         }
     }
 
+    private var hapticEnabled: Bool {
+        UserDefaults.standard.object(forKey: "showHapticFeedback") as? Bool ?? true
+    }
+
     private func handleHover(_ hovering: Bool) {
         hoverTimer?.invalidate()
+
+        // Haptic feedback on hover START
+        if hovering && hapticEnabled {
+            NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+        }
 
         withAnimation(.spring(duration: 0.25, bounce: 0.4)) {
             state.isHovered = hovering
@@ -376,7 +549,10 @@ struct NotchView: View {
             hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { _ in
                 DispatchQueue.main.async {
                     guard !self.state.isExpanded else { return }
-                    NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                    // Stronger haptic when expanding
+                    if self.hapticEnabled {
+                        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+                    }
                     withAnimation(.spring(duration: 0.5, bounce: 0.35)) {
                         self.state.isExpanded = true
                     }
@@ -481,6 +657,61 @@ struct NotchView: View {
     private func animateAudioLevels() {
         withAnimation(.easeInOut(duration: 0.1)) {
             audioLevels = audioLevels.map { _ in CGFloat.random(in: 0.15...1.0) }
+        }
+    }
+}
+
+// MARK: - Lock Icon View (Pulsing) - Larger for visibility
+
+struct LockIconView: View {
+    @State private var isPulsing = false
+
+    var body: some View {
+        ZStack {
+            // Glow background
+            Circle()
+                .fill(Color.orange.opacity(0.25))
+                .frame(width: 24, height: 24)
+                .scaleEffect(isPulsing ? 1.6 : 1.0)
+                .opacity(isPulsing ? 0.0 : 0.7)
+
+            Image(systemName: "lock.fill")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(.orange)
+                .shadow(color: .orange.opacity(0.9), radius: isPulsing ? 8 : 4)
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                isPulsing = true
+            }
+        }
+    }
+}
+
+// MARK: - Lock Pulsing Dot (Right side) - Larger for visibility
+
+struct LockPulsingDot: View {
+    @State private var isPulsing = false
+
+    var body: some View {
+        ZStack {
+            // Outer ring pulse
+            Circle()
+                .stroke(Color.orange.opacity(0.6), lineWidth: 2)
+                .frame(width: 18, height: 18)
+                .scaleEffect(isPulsing ? 1.6 : 1.0)
+                .opacity(isPulsing ? 0.0 : 0.9)
+
+            // Inner dot
+            Circle()
+                .fill(Color.orange)
+                .frame(width: 8, height: 8)
+                .shadow(color: .orange, radius: 4)
+        }
+        .onAppear {
+            withAnimation(.easeOut(duration: 1.0).repeatForever(autoreverses: false)) {
+                isPulsing = true
+            }
         }
     }
 }
@@ -707,6 +938,8 @@ struct GeneralSettingsView: View {
     @AppStorage("autoCollapseDelay") private var autoCollapseDelay = 4.0
     @AppStorage("launchAtLogin") private var launchAtLogin = false
     @AppStorage("hideFromDock") private var hideFromDock = false
+    @AppStorage("unlockSoundEnabled") private var unlockSoundEnabled = true
+    @AppStorage("showLockIndicator") private var showLockIndicator = true
 
     var body: some View {
         ScrollView {
@@ -739,6 +972,27 @@ struct GeneralSettingsView: View {
                     .onChange(of: hideFromDock) { _, newValue in
                         NSApp.setActivationPolicy(newValue ? .accessory : .regular)
                     }
+                }
+
+                // Lock Screen Section
+                SettingsSection(title: "Lock Screen") {
+                    SettingsToggleRow(
+                        title: "Lock Indicator",
+                        subtitle: "Show lock icon when screen is locked",
+                        icon: "lock.fill",
+                        color: .orange,
+                        isOn: $showLockIndicator
+                    )
+
+                    Divider().padding(.horizontal)
+
+                    SettingsToggleRow(
+                        title: "Unlock Sound",
+                        subtitle: "Play sound when screen unlocks",
+                        icon: "speaker.wave.2.fill",
+                        color: .green,
+                        isOn: $unlockSoundEnabled
+                    )
                 }
 
                 // Behavior Section

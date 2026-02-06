@@ -123,10 +123,6 @@ NotchMac requires the following permissions:
 
 The app does not collect any data and works entirely offline.
 
-## License
-
-MIT License
-
 ## Author
 
 Mark Kozhydlo
